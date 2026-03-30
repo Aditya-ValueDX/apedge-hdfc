@@ -1,0 +1,385 @@
+CREATE EXTENSION IF NOT EXISTS hstore;
+
+
+-- ap_tenants Table
+CREATE TABLE ap_tenants (
+  tenant_id SERIAL PRIMARY KEY,
+  tenant_name TEXT NOT NULL,
+  logo_path TEXT,
+  created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
+  updated_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
+  created_by INTEGER,
+  updated_by INTEGER
+);
+
+-- ap_users Table
+CREATE TABLE ap_users (
+  id SERIAL PRIMARY KEY,
+  email VARCHAR(100) UNIQUE NOT NULL,
+  contact VARCHAR(15) NOT NULL,
+  user_password TEXT NOT NULL,
+  user_role VARCHAR(20),
+  tenant_id INTEGER REFERENCES ap_tenants(tenant_id) ON DELETE SET NULL,
+  user_name VARCHAR(150),
+  created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
+  updated_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
+  is_active BOOLEAN DEFAULT TRUE,
+  metadata TEXT,
+  failed_login_attempts INTEGER DEFAULT 0,
+  last_failed_login TIMESTAMPTZ,
+  account_locked_until TIMESTAMPTZ
+);
+
+-- ap_documents Table
+CREATE TABLE ap_documents (
+  doc_id SERIAL PRIMARY KEY,
+  tenant_id INTEGER REFERENCES ap_tenants(tenant_id) ON DELETE SET NULL,
+  user_id INTEGER REFERENCES ap_users(id) ON DELETE SET NULL,
+  file_path TEXT NOT NULL,
+  status TEXT,
+  stage TEXT,
+  doc_type TEXT,
+  input_source TEXT,
+  docedge_id TEXT,
+  contents JSONB,
+  tokens BIGINT,
+  created_by INTEGER REFERENCES ap_users(id) ON DELETE SET NULL,
+  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+  updated_by INTEGER REFERENCES ap_users(id) ON DELETE SET NULL,
+  updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+  error_desc JSONB,
+  page_count INTEGER
+);
+
+-- ap_invoices Table
+CREATE TABLE ap_invoices (
+  invoice_id SERIAL PRIMARY KEY,
+  doc_id INTEGER REFERENCES ap_documents(doc_id) ON DELETE CASCADE,
+  tenant_id INTEGER REFERENCES ap_tenants(tenant_id) ON DELETE CASCADE,
+  user_id INTEGER REFERENCES ap_users(id) ON DELETE SET NULL,
+  invoice_no TEXT,
+  po_no TEXT,
+  invoice_date DATE,
+  vendor_name TEXT,
+  extracted_data JSONB NOT NULL,
+  status TEXT,
+  error_desc JSONB,
+  comments TEXT,
+  stage TEXT,
+  created_by INTEGER REFERENCES ap_users(id) ON DELETE SET NULL,
+  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+  updated_by INTEGER REFERENCES ap_users(id) ON DELETE SET NULL,
+  updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+  field_structure JSONB,
+  extracted_data_history JSONB
+);
+
+-- ap_errors Table
+CREATE TABLE ap_errors (
+  error_id SERIAL PRIMARY KEY,
+  tenant_id INTEGER REFERENCES ap_tenants(tenant_id),
+  doc_id INTEGER REFERENCES ap_documents(doc_id),
+  error_desc JSONB,
+  status TEXT,
+  stage TEXT,
+  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+  created_by INTEGER REFERENCES ap_users(id) ON DELETE SET NULL,
+  updated_by INTEGER REFERENCES ap_users(id) ON DELETE SET NULL,
+  updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+-- ap_field_config Table
+CREATE TABLE ap_field_config (
+  config_id SERIAL PRIMARY KEY,
+  tenant_id INTEGER NOT NULL REFERENCES ap_tenants(tenant_id) ON DELETE CASCADE,
+  field_name TEXT NOT NULL,
+  field_type TEXT,
+  parent TEXT,
+  description TEXT,
+  use_llm BOOLEAN DEFAULT TRUE,
+  reconcile TEXT,
+  custom_values TEXT,
+  is_required BOOLEAN DEFAULT FALSE,
+  sequence integer,
+  created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
+  created_by INTEGER REFERENCES ap_users(id) ON DELETE SET NULL,
+  updated_by INTEGER REFERENCES ap_users(id) ON DELETE SET NULL,
+  updated_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
+  display_name TEXT,
+  is_visible BOOLEAN DEFAULT TRUE,
+  meta_config JSONB		
+);
+
+-- ap_reconcile Table
+CREATE TABLE ap_reconcile (
+  reconcile_id SERIAL PRIMARY KEY,
+  tenant_id INTEGER REFERENCES ap_tenants(tenant_id) ON DELETE CASCADE,
+  user_id INTEGER REFERENCES ap_users(id) ON DELETE SET NULL,
+  doc_id INTEGER REFERENCES ap_documents(doc_id) ON DELETE CASCADE,
+  invoice_id INTEGER REFERENCES ap_invoices(invoice_id) ON DELETE CASCADE,
+  reconciled_data JSONB,
+  status TEXT,
+  stage TEXT,
+  comments TEXT,
+  created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
+  created_by INTEGER REFERENCES ap_users(id) ON DELETE SET NULL,
+  updated_by INTEGER REFERENCES ap_users(id) ON DELETE SET NULL,
+  updated_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
+  po_data JSONB,
+  grn_data JSONB,
+  recon_data TEXT
+);
+
+-- ap_parameters Table
+CREATE TABLE ap_parameters (
+  parameter_id SERIAL PRIMARY KEY,
+  tenant_id INTEGER REFERENCES ap_tenants(tenant_id) ON DELETE CASCADE,
+  unique_key TEXT NOT NULL,
+  req_value TEXT,
+  description TEXT,
+  apedge_group TEXT,
+  metadata TEXT,
+  protected_config TEXT,
+  edit BOOLEAN DEFAULT TRUE,
+  delete BOOLEAN DEFAULT TRUE,
+  created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
+  created_by INTEGER REFERENCES ap_users(id) ON DELETE SET NULL,
+  updated_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
+  updated_by INTEGER REFERENCES ap_users(id) ON DELETE SET NULL,
+
+  -- tenant + unique_key uniqueness
+  CONSTRAINT ap_parameters_tenant_unique_key_unique UNIQUE (tenant_id, unique_key)
+);
+
+-- ap_masters Table
+CREATE TABLE ap_masters (
+  master_id SERIAL PRIMARY KEY,
+  tenant_id INTEGER REFERENCES ap_tenants(tenant_id) ON DELETE CASCADE,
+  unique_key TEXT NOT NULL,
+  file_path TEXT,
+  description TEXT,
+  created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
+  created_by INTEGER REFERENCES ap_users(id) ON DELETE SET NULL,
+  updated_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
+  updated_by INTEGER REFERENCES ap_users(id) ON DELETE SET NULL,
+
+  -- tenant + unique_key should be unique
+  CONSTRAINT ap_masters_tenant_unique_key_unique UNIQUE (tenant_id, unique_key)
+);
+
+
+CREATE TABLE ap_pos (
+    po_id SERIAL PRIMARY KEY,
+    doc_id INTEGER REFERENCES ap_documents(doc_id) ON DELETE CASCADE,
+    tenant_id INTEGER REFERENCES ap_tenants(tenant_id) ON DELETE CASCADE,
+    user_id INTEGER REFERENCES ap_users(id) ON DELETE SET NULL,
+    po_no TEXT,
+    po_date DATE,
+    vendor_name TEXT,
+    extracted_data JSONB NOT NULL,
+    status TEXT,
+    error_desc JSONB,
+    comments TEXT,
+    stage TEXT,
+    created_by INTEGER REFERENCES ap_users(id) ON DELETE SET NULL,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_by INTEGER REFERENCES ap_users(id) ON DELETE SET NULL,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+
+CREATE TABLE ap_password_reset (
+    id SERIAL PRIMARY KEY,
+    email VARCHAR(150) NOT NULL,
+    otp VARCHAR(10) NOT NULL,
+    expires_at TIMESTAMP NOT NULL,
+    used_flag BOOLEAN DEFAULT FALSE,
+    reset_token UUID,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE ap_generic_fields (
+    id INT PRIMARY KEY,
+    field VARCHAR(255) NOT NULL,
+    type VARCHAR(255) NOT NULL,
+    parent VARCHAR(255),
+    description TEXT NOT NULL,
+    reconcile VARCHAR(255),
+    use_llm BOOLEAN
+);
+
+INSERT INTO ap_generic_fields (id, field, type, parent, description, reconcile, use_llm) VALUES
+(1, 'Bill_To_address', 'text', NULL, 'Address of the buyer to whom the invoice is billed.', 'false', TRUE),
+(2, 'Vendor_company_name', 'text', NULL, 'Registered company name of the vendor mentioned on the invoice.', 'false', TRUE),
+(3, 'Vendor_GSTIN', 'text', NULL, 'GSTIN of the vendor/supplier. Pattern: ^[0-9]{2}[A-Z]{5}[0-9]{4}[A-Z]{1}[1-9A-Z]{1}Z[0-9A-Z]{1}$', 'false', TRUE),
+(4, 'INV_No', 'text', NULL, 'Unique identification number assigned to the invoice document.', 'false', TRUE),
+(5, 'INV_Date', 'text', NULL, 'Date on which the invoice was issued by the vendor. Convert to YYYY-MM-DD format.', 'false', TRUE),
+(6, 'PO_Number', 'text', NULL, 'Purchase order reference number related to the invoice.', 'false', TRUE),
+(7, 'LineItems', 'array', NULL, 'List of item lines in the invoice.', 'false', TRUE),
+(8, 'Description', 'text', 'LineItems', 'Description of each product or service.', 'false', TRUE),
+(9, 'HSN_SAC_code', 'text', 'LineItems', 'HSN or SAC code for each product/service.', 'false', TRUE),
+(10, 'Quantity', 'text', 'LineItems', 'Quantity of the product/service.', 'false', TRUE),
+(11, 'LineItems_IGST_Amount', 'text', 'LineItems', 'IGST amount applied on line item.', 'false', TRUE),
+(12, 'LineItems_IGST_Percent', 'text', 'LineItems', 'IGST percentage on line item.', 'false', TRUE),
+(13, 'LineItems_SGST_amount', 'text', 'LineItems', 'SGST amount applied on line item.', 'false', TRUE),
+(14, 'LineItems_SGST_Percent', 'text', 'LineItems', 'SGST percentage on line item.', 'false', TRUE),
+(15, 'LineItems_CGST_amount', 'text', 'LineItems', 'CGST amount applied on line item.', 'false', TRUE),
+(16, 'LineItems_CGST_Percent', 'text', 'LineItems', 'CGST percentage on line item.', 'false', TRUE),
+(17, 'Amount', 'text', 'LineItems', 'Total line item amount including taxes.', 'false', TRUE);
+
+
+CREATE TABLE ap_default_configs (
+    config_id SERIAL PRIMARY KEY,
+    config_type VARCHAR(50) NOT NULL, -- 'parameter' or 'master'
+    unique_key VARCHAR(255) NOT NULL UNIQUE,
+    default_value TEXT,
+    description TEXT,
+    metadata TEXT, -- For additional configuration data
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    created_by INTEGER,
+    updated_by INTEGER
+);
+
+-- Indexes for better performance
+CREATE INDEX idx_ap_default_configs_type ON ap_default_configs(config_type);
+CREATE INDEX idx_ap_default_configs_key ON ap_default_configs(unique_key);
+
+----------- ap_user_login_audit ------------------
+
+CREATE TABLE ap_user_login_audit (
+  audit_id BIGSERIAL PRIMARY KEY,
+  user_id INTEGER REFERENCES ap_users(id) ON DELETE CASCADE,
+  tenant_id INTEGER,
+  login_time TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
+  login_status VARCHAR(20),   -- SUCCESS / FAILED / LOCKED / REFRESH
+  ip_address VARCHAR(45),     -- IPv4 + IPv6
+  user_agent TEXT,
+  failure_reason TEXT
+);
+
+
+CREATE TABLE ap_itemmaster (
+  ap_item_master_id SERIAL PRIMARY KEY,
+  vendor_name VARCHAR(255) NOT NULL,
+  invoice_itemdesc TEXT,
+  erp_item_desc TEXT,
+  tenant_id INTEGER REFERENCES ap_tenants(tenant_id) ON DELETE SET NULL,
+  created_by INTEGER REFERENCES ap_users(id) ON DELETE SET NULL,
+  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+  updated_by INTEGER REFERENCES ap_users(id) ON DELETE SET NULL,
+  updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+
+CREATE TABLE ap_process_workflow_instances (
+    instance_id SERIAL PRIMARY KEY,
+    tenant_id INTEGER REFERENCES ap_tenants(tenant_id),
+    module_name VARCHAR(100) NOT NULL,
+    Process_name VARCHAR(100) NOT NULL,
+ 
+    -- Current State
+    current_step VARCHAR(100) NOT NULL,
+    next_step VARCHAR(100) NOT NULL,
+    status VARCHAR(100) NOT NULL, -- e.g., 'In Progress', 'Approved'
+
+	  error_desc JSONB,
+	
+    -- Ownership & Traceability
+    created_by INTEGER REFERENCES ap_users(id) ON DELETE SET NULL,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_by INTEGER REFERENCES ap_users(id) ON DELETE SET NULL,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    is_active BOOLEAN DEFAULT TRUE
+);
+
+CREATE TABLE ap_process_workflow_history (
+    history_id SERIAL PRIMARY KEY,
+    tenant_id INTEGER REFERENCES ap_tenants(tenant_id),
+    instance_id INTEGER REFERENCES ap_process_workflow_instances(instance_id),
+    module_name VARCHAR(100) NOT NULL,
+    Process_name VARCHAR(100) NOT NULL,
+ 
+    -- 1. TIME Traceability
+    transaction_timestamp TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+   
+    -- 2. OWNERSHIP Traceability (Who did it?)
+    created_by INTEGER REFERENCES ap_users(id) NOT NULL,
+    created_role_name VARCHAR(50) NOT NULL,   -- The role they assumed (e.g., 'Manager')
+   
+    -- 3. ACTION Traceability (What did they do?)
+    previous_step VARCHAR(50),
+    next_step VARCHAR(100),
+    actionRef VARCHAR(100),             -- Button ID (e.g., 'btn_reject')
+    user_comments TEXT,                     -- Reasoning (e.g., "Budget too high")
+    status VARCHAR(100),             -- status of workflow (e.g., 'Submitted', 'approved')
+   
+    -- 4. DATA Traceability (Snapshot)
+    -- Stores the state of the JSONB data after the change.
+    history_json JSONB
+);
+
+CREATE TABLE ap_vendor_field_config (
+    vendor_config_id SERIAL PRIMARY KEY,
+    tenant_id INTEGER NOT NULL REFERENCES ap_tenants(tenant_id) ON DELETE SET NULL,
+    field_name TEXT NOT NULL,
+    display_name TEXT NOT NULL,
+    field_type TEXT,
+    parent TEXT,
+    description TEXT,
+    custom_values TEXT,
+    meta_config JSONB,
+    use_llm BOOLEAN DEFAULT TRUE,
+    reconcile TEXT,
+    sequence INTEGER,
+    created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
+    created_by INTEGER REFERENCES ap_users(id) ON DELETE SET NULL,
+    updated_by INTEGER REFERENCES ap_users(id) ON DELETE SET NULL,
+    updated_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE ap_vendors (
+    vendor_id SERIAL PRIMARY KEY,
+    tenant_id INTEGER REFERENCES ap_tenants(tenant_id) ON DELETE SET NULL,
+    instance_id INTEGER REFERENCES ap_process_workflow_instances(instance_id) ON DELETE SET NULL,
+    vendor_code TEXT,                 -- ERP vendor code (optional initially)
+    vendor_name TEXT NOT NULL,
+    vendor_type TEXT,                 -- Domestic / International / One-time
+    status TEXT,                       -- DRAFT | APPROVED | REJECTED | SYNCED
+    stage TEXT,                        -- UI / workflow stage
+    extracted_data JSONB,              -- Raw extracted / entered vendor data
+    validated_data JSONB,              -- Cleaned & approved data
+    error_desc JSONB,
+    comments TEXT,
+    created_by INTEGER REFERENCES ap_users(id) ON DELETE SET NULL,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_by INTEGER REFERENCES ap_users(id) ON DELETE SET NULL,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+
+CREATE TABLE churn_policy (
+  	churn_policy_id BIGSERIAL PRIMARY KEY, -- Unique policy record ID
+	  instance_id INTEGER REFERENCES ap_process_workflow_instances(instance_id),
+    tenant_id INTEGER REFERENCES ap_tenants(tenant_id) ON DELETE SET NULL,
+	  new_policy_number VARCHAR(100), -- New policy number issued
+  	new_policy_rcd VARCHAR(100), -- New policy record identifier
+  	old_policy_number VARCHAR(100), -- Previous policy number
+  	fls_name VARCHAR(100), -- Field level staff name
+  	fls_code VARCHAR(50), -- Field level staff code
+  	channel_hod_name VARCHAR(100), -- Head of channel name
+  	attachment_type VARCHAR(100), -- Type of document attachment
+  	exception_reason TEXT, -- Reason for exception handling
+  	old_channel VARCHAR(100), -- Channel name
+  	fls_email_excel VARCHAR(100), -- FLS responsible email
+  	fls_name_excel VARCHAR(100), -- FLS responsible person name
+  	policy_status VARCHAR(50), -- Current status (SUBMITTED, APPROVED, REJECTED, etc.)
+  	action_comments TEXT, -- Comments from users/approvers/admin
+  	approver_revert_count INTEGER, -- Number of times approver reverted
+  	admin_revert_count INTEGER, -- Number of times admin reverted
+  	created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP, -- Record creation timestamp
+  	created_by INTEGER REFERENCES ap_users(id) ON DELETE SET NULL, -- User who created policy
+  	updated_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP, -- Last updated timestamp
+  	updated_by INTEGER REFERENCES ap_users(id) ON DELETE SET NULL -- User who last updated policy
+);
+
