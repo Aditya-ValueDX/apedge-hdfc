@@ -113,6 +113,7 @@ export const PERMISSIONS = {
             '/po_editor/:poId', // Added: PO View (dynamic path)
             '/po_completed', // Added: Approved POs
             '/tenantlogo', // Tenant Logo Management
+            '/tenantreg', // Tenant Registration
         ],
         canEdit: [
             // 'upload_document',        // REMOVED: Tenant Admin should not upload
@@ -124,6 +125,7 @@ export const PERMISSIONS = {
             'parameters',           // Parameters: Edit
             'all_users',
             'tenant_logo',          // Tenant Logo: Edit
+            'tenant_registration',    // Tenant Registration: Edit
             // 'po_approve_reject', // Added: PO View: approve/reject
         ],
         canDelete: [
@@ -133,6 +135,7 @@ export const PERMISSIONS = {
             // 'all_users',
             'po_list_delete', // Added: PO List: Delete
             'tenant_logo',    // Tenant Logo: Delete
+            'tenant_registration', // Tenant Registration: Delete
         ],
     },
     super_admin: { // Mapped from "Super Admin"

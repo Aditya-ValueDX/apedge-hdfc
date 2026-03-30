@@ -282,38 +282,38 @@ const Sidebar = ({ collapsed, toggleCollapse, onHelpPopupToggle }) => {
         ];
 
         const adminConfigItems = [
-            {
-                label: 'Invoice Field Config',
-                path: '/configure',
-                icon: <FileCog size={14} />,
-            },
+            // {
+            //     label: 'Invoice Field Config',
+            //     path: '/configure',
+            //     icon: <FileCog size={14} />,
+            // },
             ...(hasVendorAccess ? [{
-                label: 'Vendor Field Config',
+                label: 'Field Config',
                 path: '/vendor_configure',
                 icon: <Settings size={14} />
             }] : []),
-            {
-                label: 'Parameters',
-                path: '/parameters',
-                icon: <SlidersHorizontal size={14} />,
-            },
-            {
-                label: 'Masters',
-                path: '/masters',
-                icon: <Database size={14} />,
-            },
+            // {
+            //     label: 'Parameters',
+            //     path: '/parameters',
+            //     icon: <SlidersHorizontal size={14} />,
+            // },
+            // {
+            //     label: 'Masters',
+            //     path: '/masters',
+            //     icon: <Database size={14} />,
+            // },
             {
                 label: 'User Management',
                 path: '/users',
                 icon: <Users size={14} />,
             },
-            ...(role === 'tenant_admin' ? [
-                {
-                    label: 'Tenant Logo',
-                    path: '/tenantlogo',
-                    icon: <Image size={14} />,
-                }
-            ] : [])
+            // ...(role === 'tenant_admin' ? [
+            //     {
+            //         label: 'Tenant Logo',
+            //         path: '/tenantlogo',
+            //         icon: <Image size={14} />,
+            //     }
+            // ] : [])
         ];
 
         const poSubmenuItems = [
@@ -383,6 +383,16 @@ const Sidebar = ({ collapsed, toggleCollapse, onHelpPopupToggle }) => {
         // Add Admin menu if applicable
         if (role === 'tenant_admin' || role === 'super_admin') {
             const adminChildren = adminConfigItems.filter((item) => canUserView(role, item.path));
+            
+            // Add Tenant Registration to admin menu for tenant admins
+            if (canUserView(role, '/tenantreg') && (role === 'tenant_admin' || role === 'super_admin')) {
+                adminChildren.push({
+                    label: 'Channel Registration',
+                    path: '/tenantreg',
+                    icon: <Receipt size={14} />,
+                });
+            }
+            
             if (adminChildren.length > 0) {
                 filteredMenuItems.push({
                     label: 'Admin',
@@ -392,19 +402,6 @@ const Sidebar = ({ collapsed, toggleCollapse, onHelpPopupToggle }) => {
                 });
             }
         }
-
-        // Add Purchase Order menu if applicable
-        // if (role === 'tenant_admin' || role === 'super_admin') {
-        //     const poChildren = poSubmenuItems.filter((item) => canUserView(role, item.path));
-        //     if (poChildren.length > 0) {
-        //         filteredMenuItems.push({
-        //             label: 'Purchase Order',
-        //             path: '/purchase-orders',
-        //             icon: <ShoppingCart size={18} />,
-        //             children: poChildren,
-        //         });
-        //     }
-        // }
 
         // Add Super Admin menu for Super Admin users
         if (role === 'super_admin') {
@@ -425,15 +422,6 @@ const Sidebar = ({ collapsed, toggleCollapse, onHelpPopupToggle }) => {
                     label: 'Generic Fields',
                     path: '/generic-fields',
                     icon: <Database size={14} />,
-                });
-            }
-            
-            // Add Tenant Registration if user can view it
-            if (canUserView(role, '/tenantreg')) {
-                superAdminItems.push({
-                    label: 'Tenant Registration',
-                    path: '/tenantreg',
-                    icon: <Receipt size={14} />,
                 });
             }
             
