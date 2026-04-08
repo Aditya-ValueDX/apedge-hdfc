@@ -1097,6 +1097,7 @@ const VendorFormUI = ({
   onLineItemAdd, // NEW PROP
   onLineItemDelete, // NEW PROP
   onReject,
+  onRevert,
   onHold,
   onSendToReconciliation,
   onApproveAndUpload,
@@ -1145,6 +1146,9 @@ const VendorFormUI = ({
   isWorkflowCompleted = false,
   workflowHistory = [], // Pre-fetched workflow history with resolved user names
   isWorkflowMissing = false, // True when vendor_workflow_json key is absent or meta is invalid
+  maxRevertCount = 3,          // Global cap defined in VendorEditor
+  approverRevertCount = 0,     // From churn_policy.approver_revert_count — used by spoc
+  adminRevertCount = 0,        // From churn_policy.admin_revert_count    — used by admin
 }) => {
   const [dragOver, setDragOver] = useState(false);
   const [uploadProgress, setUploadProgress] = useState({});
@@ -1152,6 +1156,35 @@ const VendorFormUI = ({
   const [mainActiveTab, setMainActiveTab] = useState('vendor_form');
   const [nonManualActiveTab, setNonManualActiveTab] = useState('vendor_form');
   const [activeNestedTab, setActiveNestedTab] = useState(null);
+
+  // Revert confirmation modal state
+  const [showRevertModal, setShowRevertModal] = useState(false);
+  const [revertComment, setRevertComment] = useState('');
+  const [revertCommentError, setRevertCommentError] = useState('');
+
+  // ---------------------------------------------------------------------------
+  // Revert count — role-aware limit enforcement
+  // spoc  → reads approver_revert_count
+  // admin / super_admin → reads admin_revert_count
+  // The count badge and button-disabled state are derived from these values.
+  // ---------------------------------------------------------------------------
+  const user = useSelector((state) => state.auth.user);
+  const currentUserRole = user?.role;
+  const isSpocUser  = currentUserRole === 'spoc';
+  const isAdminUser = currentUserRole === 'admin' || currentUserRole === 'super_admin';
+
+  // How many reverts this role has already used
+  const usedRevertCount = isSpocUser
+    ? approverRevertCount
+    : isAdminUser
+      ? adminRevertCount
+      : 0;
+
+  // How many are left (floored at 0 to avoid negatives)
+  const revertsLeft = Math.max(0, maxRevertCount - usedRevertCount);
+
+  // True when this role's revert quota is exhausted
+  const isRevertLimitReached = (isSpocUser || isAdminUser) && revertsLeft === 0;
   const location = useLocation();
 
   const isManualVendor = location?.state?.type === "manualVendor" ||
@@ -1167,12 +1200,13 @@ const VendorFormUI = ({
     };
   }, []);
 
-  // Auto-reset non-manual "Uploaded Documents" tab to "Vendor Form" when documents become available
+  // Documents tab should remain accessible regardless of document presence
+  // Previously auto-reset non-manual "Uploaded Documents" tab to "Vendor Form" when documents become available
+  // This behavior has been removed to keep the documents tab accessible
   useEffect(() => {
-    if (!isManualVendor && nonManualActiveTab === 'uploaded_documents' && documents && documents.length > 0) {
-      setNonManualActiveTab('vendor_form');
-    }
-  }, [isManualVendor, nonManualActiveTab, documents]);
+    // Keep documents tab accessible even when documents are present
+    // This ensures users can always access their documents
+  }, [documents]);
 
   // Helper function to check if a field's parent is a tab
   const isParentATab = useCallback((parentName) => {
@@ -1297,7 +1331,7 @@ const VendorFormUI = ({
 
   const renderFormContent = () => (
     <>
-      <div className="panel-content p-4 flex flex-col gap-5 overflow-y-auto flex-grow min-h-0">
+      <div className="panel-content p-4 flex flex-col gap-3 overflow-y-auto flex-grow min-h-0">
         <MessageDisplay errorDesc={errorDesc} />
         {/* --- GLOBAL FIELDS (Above Tabs) --- */}
         {globalFields.length > 0 && (
@@ -1852,7 +1886,7 @@ const VendorFormUI = ({
         {/* Add Comments Section when not creating a new vendor */}
 
         <div>
-          <div className="pb-4 last:border-b-0 last:pb-0 flex-grow min-h-0 flex flex-col bg-white rounded-xl">
+          <div className="pb-1 last:border-b-0 last:pb-0 flex flex-col bg-white rounded-xl">
             {/* Previous Comments Accordion */}
             <div className="mb-3">
               <PreviousCommentsAccordion workflowHistory={workflowHistory} />
@@ -1865,7 +1899,7 @@ const VendorFormUI = ({
             </div>
             <div
               className={`flex flex-col min-w-0 ${errors.rejectionComment ? "text-red-500" : ""
-                } flex-grow transition-all duration-200`}
+                } transition-all duration-200`}
             >
               <div className="mt-1 text-[10px] text-gray-400 flex justify-between">
                 <label
@@ -1894,7 +1928,7 @@ const VendorFormUI = ({
                 className={`w-full px-2 py-1.5 border border-gray-200 rounded-md text-[11px] font-normal text-gray-700 bg-white transition-all duration-200 ease-in-out focus:border-indigo-400 focus:ring-2 focus:ring-indigo-100 focus:outline-none disabled:cursor-not-allowed placeholder-gray-300 ${errors.rejectionComment
                   ? "border-red-400 bg-red-50 ring-red-100 ring-1"
                   : "hover:border-gray-300"
-                  } flex-grow min-h-16 resize-y`}
+                  } resize-y`}
                 rows="2"
                 placeholder="Enter comments or rejection reason..."
                 disabled={!isFormEditable}
@@ -1913,7 +1947,6 @@ const VendorFormUI = ({
                   {errors.rejectionComment}
                 </div>
               )}
-              <div className="mt-2"></div>
             </div>
           </div>
         </div>
@@ -2047,7 +2080,6 @@ const VendorFormUI = ({
   );
 
   // Get user and token from Redux store
-  const user = useSelector((state) => state.auth.user);
   const token = useSelector((state) => state.auth.token);
 
   const {
@@ -2100,33 +2132,15 @@ const VendorFormUI = ({
     if (!workflowConfig) return null;
     const steps = workflowConfig.steps ?? [];
     if (!steps.length) return null;
-
-    // If the editor has already resolved the current step from the workflow
-    // instance table (ap_process_workflow_instances), use it directly.
-    // This is the authoritative source when an instance_id exists.
+    // currentWorkflowStepId (from ap_process_workflow_instances.current_step) is
+    // the sole source of truth. Status is never used to derive the current step.
     if (currentWorkflowStepId) {
       const matched = steps.find(s => s.stepId === currentWorkflowStepId);
       if (matched) return matched;
     }
-
-    // No instance yet (new vendor / null instance_id) → initial step
-    if (!vendorStatus) return steps[0];
-
-    // Walk every step+transition to find which step we have landed on
-    for (const step of steps) {
-      for (const transition of (step.transitions ?? [])) {
-        const du = transition.dataUpdates ?? {};
-        // The transition fires and sets NextStep; we are now AT that next step
-        if (du.status === vendorStatus && du.NextStep) {
-          const targetStep = steps.find(s => s.stepId === du.NextStep);
-          if (targetStep) return targetStep;
-        }
-      }
-    }
-
-    // Fallback: initial step
+    // No instance yet (brand-new record) → show the initial step's buttons
     return steps[0];
-  }, [workflowConfig, vendorStatus, currentWorkflowStepId]);
+  }, [workflowConfig, currentWorkflowStepId]);
 
   // ---------------------------------------------------------------------------
   // workflowCreateAllowed — true when the user's role appears in meta.permissions.create
@@ -2151,16 +2165,18 @@ const VendorFormUI = ({
     const step = currentWorkflowStep ?? workflowConfig.steps?.[0];
     const transitions = step?.transitions ?? [];
 
-    // Collect every actionRef whose permissions.visible includes this user's role
+    // Collect every actionRef whose permissions.visible includes this user's role.
+    // All comparisons are lowercased — role casing in the JSON never matters.
+    const userRoleLower = userRole.toLowerCase();
     const visibleActions = new Set();
     transitions.forEach(t => {
-      const visibleRoles = t.permissions?.visible ?? [];
-      if (visibleRoles.includes(userRole)) {
+      const visibleRoles = (t.permissions?.visible ?? []).map(r => r.toLowerCase());
+      if (visibleRoles.includes(userRoleLower)) {
         visibleActions.add(t.actionRef?.toLowerCase());
       }
     });
 
-    const inCreate = createRoles.includes(userRole);
+    const inCreate = createRoles.map(r => r.toLowerCase()).includes(userRoleLower);
     const steps0Id = workflowConfig.steps?.[0]?.stepId;
     const onStep0 = !step || step.stepId === steps0Id;
 
@@ -2169,7 +2185,7 @@ const VendorFormUI = ({
       workflowVisibleActions: visibleActions,
       isInitialStep: onStep0,
     };
-  }, [workflowConfig, user, currentWorkflowStep, currentWorkflowStepId]);
+  }, [workflowConfig, user, currentWorkflowStep]);
 
   // Permission denied message for editing fields and buttons
   const editPermissionMessage = isReadonly
@@ -4058,7 +4074,7 @@ const VendorFormUI = ({
 
   return (
     // --- UPDATED: Main Container — always full-width form, no left document panel ---
-    <div className="font-[poppins] text-gray-800 p-3 lg:h-[calc(100vh-98px)] flex justify-center items-center w-full max-sm:p-2 max-sm:h-auto">
+    <div className="font-[poppins] text-gray-800 p-3 lg:h-[calc(100vh-168px)] flex justify-center items-center w-full max-sm:p-2 max-sm:h-auto">
       {isDragging && (
         <div className="fixed inset-0 z-[9998] cursor-col-resize" />
       )}
@@ -4083,9 +4099,7 @@ const VendorFormUI = ({
         {/* --- FORM PANEL: Full width, always shown --- */}
         <div className="w-full flex flex-col h-full bg-white overflow-hidden">
           <div ref={formContainerRef} className="flex flex-col h-full min-h-0">
-
-
-
+            
             {/* Form Header */}
             {isManualVendor ? (
               renderMainTabs()
@@ -4108,8 +4122,7 @@ const VendorFormUI = ({
                         : 'bg-gray-200 opacity-0 group-hover:opacity-100'
                         }`} />
                     </button>
-                    {(!documents || documents.length === 0) && (
-                      <button
+                    <button
                         onClick={() => setNonManualActiveTab('uploaded_documents')}
                         className={`pb-2.5 pt-2 text-[12px] font-medium transition-all relative group ${nonManualActiveTab === 'uploaded_documents'
                           ? 'text-indigo-600'
@@ -4122,7 +4135,6 @@ const VendorFormUI = ({
                           : 'bg-gray-200 opacity-0 group-hover:opacity-100'
                           }`} />
                       </button>
-                    )}
                     <button
                       onClick={() => setNonManualActiveTab('approval_history')}
                       className={`pb-2.5 pt-2 text-[12px] font-medium transition-all relative group ${nonManualActiveTab === 'approval_history'
@@ -4176,8 +4188,8 @@ const VendorFormUI = ({
                   <div className="flex-1 overflow-y-auto bg-gray-50/50">
                     <VendorApprovalHistory instanceId={instanceId} />
                   </div>
-                ) : nonManualActiveTab === 'uploaded_documents' && (!documents || documents.length === 0) ? (
-                  /* ── Uploaded Documents Tab (only when no documents exist) ── */
+                ) : nonManualActiveTab === 'uploaded_documents' ? (
+                  /* ── Uploaded Documents Tab (always shown) ── */
                   <div className="flex-1 overflow-y-auto">
                     <VendorDocuments
                       documents={documents}
@@ -4203,46 +4215,105 @@ const VendorFormUI = ({
             {/* --- FOOTER: ACTION BUTTONS --- */}
             {!isWorkflowCompleted && (
               <div
-                className="flex justify-end items-center gap-3 px-4 py-2.5 bg-white border-t border-gray-100 flex-shrink-0 max-sm:flex-col max-sm:items-stretch max-sm:p-4 max-sm:gap-3"
+                className="flex justify-between items-center gap-2 px-4 py-2 bg-white border-t border-gray-100 flex-shrink-0 max-sm:flex-col max-sm:items-stretch max-sm:p-3 max-sm:gap-2"
                 data-tour="editor-action-buttons"
               >
-                {/* Back Button */}
-                {/* <button
-                                  onClick={onBack}
-                                  className="inline-flex items-center justify-center gap-1 px-4 py-1 rounded-lg font-semibold text-sm cursor-pointer transition-all duration-300 ease-in-out shadow-lg hover:shadow-xl hover:-translate-y-1 bg-white text-gray-600 border-2 border-gray-200 hover:bg-gray-100 hover:text-gray-800 disabled:opacity-50 disabled:cursor-not-allowed disabled:transform-none disabled:bg-gray-100 disabled:text-gray-500 max-sm:w-full"
-                              >
-                                  <ArrowLeft size={18} /> Back
-                              </button> */}
+                {/* ── Revert Usage Indicator (left-side, role-aware) ── */}
+                {(isSpocUser || isAdminUser) && !isWorkflowMissing && (
+                  <div className={`flex items-center gap-2.5 px-3 py-1.5 rounded-lg border flex-shrink-0 ${
+                    isRevertLimitReached
+                      ? 'bg-red-50 border-red-200'
+                      : usedRevertCount === maxRevertCount - 1
+                        ? 'bg-amber-50 border-amber-200'
+                        : 'bg-gray-50 border-gray-200'
+                  }`}>
+                    {/* Icon */}
+                    <div className={`flex-shrink-0 w-5 h-5 rounded-full flex items-center justify-center ${
+                      isRevertLimitReached
+                        ? 'bg-red-100'
+                        : usedRevertCount === maxRevertCount - 1
+                          ? 'bg-amber-100'
+                          : 'bg-indigo-100'
+                    }`}>
+                      <ArrowLeft size={10} className={
+                        isRevertLimitReached
+                          ? 'text-red-500'
+                          : usedRevertCount === maxRevertCount - 1
+                            ? 'text-amber-600'
+                            : 'text-indigo-500'
+                      } />
+                    </div>
 
-                <div className="flex gap-2 justify-end max-sm:flex-col max-sm:gap-3 max-sm:w-full">
+                    {/* Label + dots */}
+                    <div className="flex flex-col gap-1 min-w-0">
+                      <span className={`text-[10px] font-semibold leading-none whitespace-nowrap ${
+                        isRevertLimitReached
+                          ? 'text-red-600'
+                          : usedRevertCount === maxRevertCount - 1
+                            ? 'text-amber-700'
+                            : 'text-gray-600'
+                      }`}>
+                        {isRevertLimitReached
+                          ? 'Revert Limit Reached'
+                          : 'Reverts Used'}
+                      </span>
+
+                      {/* Step dots row */}
+                      <div className="flex items-center gap-1">
+                        {Array.from({ length: maxRevertCount }).map((_, i) => {
+                          const isUsed = i < usedRevertCount;
+                          const isLast = i === maxRevertCount - 1;
+                          return (
+                            <span
+                              key={i}
+                              title={isUsed ? `Revert ${i + 1} used` : `Revert ${i + 1} available`}
+                              className={`block rounded-full transition-all duration-300 ${
+                                isUsed
+                                  ? isRevertLimitReached
+                                    ? 'w-3.5 h-2 bg-red-500'         // all used → red
+                                    : isLast && usedRevertCount === maxRevertCount - 1
+                                      ? 'w-3.5 h-2 bg-amber-400'     // last used dot → amber
+                                      : 'w-3.5 h-2 bg-amber-500'
+                                  : 'w-2 h-2 bg-gray-200'            // unused → gray hollow
+                              }`}
+                            />
+                          );
+                        })}
+                        <span className={`ml-0.5 text-[10px] font-bold tabular-nums leading-none ${
+                          isRevertLimitReached
+                            ? 'text-red-500'
+                            : usedRevertCount === maxRevertCount - 1
+                              ? 'text-amber-600'
+                              : 'text-gray-500'
+                        }`}>
+                          {usedRevertCount}/{maxRevertCount}
+                        </span>
+                      </div>
+                    </div>
+                  </div>
+                )}
+
+                {/* ── Right side: all action buttons ── */}
+                <div className="flex gap-2 justify-end max-sm:flex-col max-sm:gap-2 max-sm:w-full">
                   {/*
                     ─────────────────────────────────────────────────────────────
                     FOOTER BUTTON RULES (driven by workflowConfig + user role)
                     ─────────────────────────────────────────────────────────────
-                    1. "Save Draft" + "Cancel" are ALWAYS shown on the initial step
-                      (step[0]), regardless of transitions.  On later steps they
-                      are hidden — reviewers don't draft, they act.
+                    Buttons are rendered dynamically from workflowConfig transitions
+                    for the current step, filtered to only those whose
+                    permissions.visible includes the current user's role.
 
-                    2. Transition buttons (Submit / Approve & Upload / Reject / Hold)
-                      are shown only when:
-                        a) The transition's actionRef appears in workflowVisibleActions
-                            (i.e. the current user's role is listed in that
-                            transition's permissions.visible array), AND
-                        b) The button maps to the current workflow step's transitions.
+                    actionRef → handler/style mapping:
+                      btn_draft   → Save Draft  (indigo outline, initial step only)
+                      btn_submit  → Submit       (indigo solid)
+                      btn_approve → Approve      (emerald solid)
+                      btn_reject  → Reject       (red outline)
+                      btn_revert  → Revert       (amber outline) — opens confirmation modal
+                      btn_hold    → On Hold      (amber outline)
 
-                    3. When workflowConfig is absent every button falls back to its
-                      old visibility logic so existing non-workflow vendors are
-                      unaffected.
-
-                    4. When isWorkflowMissing is true (vendor_workflow_json key absent
-                      OR meta is not valid JSON), ALL buttons except Cancel are hidden
-                      and a warning banner is shown in the footer.
-
-                    actionRef → button mapping:
-                      btn_submit  → <Submit>
-                      btn_approve → <Approve & Upload>
-                      btn_reject  → <Reject>
-                      btn_hold    → <On Hold>   (also shown alongside btn_reject by default)
+                    Cancel is always shown as the last button.
+                    When workflowConfig is missing a warning banner replaces all
+                    action buttons.
                     ─────────────────────────────────────────────────────────────
                   */}
 
@@ -4256,79 +4327,259 @@ const VendorFormUI = ({
                     </div>
                   )}
 
-                  {/* Save Draft */}
-                  {!isWorkflowMissing && (!workflowConfig || (isInitialStep && workflowVisibleActions.has('btn_draft'))) && (
-                    <button
-                      onClick={onSaveDraft}
-                      className="inline-flex items-center justify-center gap-1.5 px-3 py-1.5 rounded-lg font-medium text-[11px] cursor-pointer transition-all duration-200 ease-in-out bg-white text-indigo-600 border border-indigo-200 hover:bg-indigo-50 hover:border-indigo-300 disabled:opacity-40 disabled:cursor-not-allowed disabled:bg-gray-50 disabled:text-gray-400 disabled:border-gray-200 max-sm:w-full shadow-sm"
-                      disabled={!isFormEditable}
-                      title={!isFormEditable ? editPermissionMessage : "Save as draft"}
-                    >
-                      Save Draft
-                    </button>
-                  )}
+                  {/* ── Dynamic transition buttons ── */}
+                  {!isWorkflowMissing && (() => {
+                    // Map each known actionRef to its handler, label, style, and any extras
+                    const ACTION_MAP = {
+                      btn_draft: {
+                        label: 'Save Draft',
+                        handler: onSaveDraft,
+                        className: 'bg-white text-indigo-600 border border-indigo-200 hover:bg-indigo-50 hover:border-indigo-300 disabled:bg-gray-50 disabled:text-gray-400 disabled:border-gray-200',
+                        tooltip: 'Save as draft',
+                        // Only show on initial step
+                        onlyInitial: true,
+                      },
+                      btn_submit: {
+                        label: 'Submit',
+                        handler: onSubmit,
+                        className: 'bg-indigo-600 text-white hover:bg-indigo-700 disabled:bg-gray-200 disabled:text-gray-400',
+                        tooltip: 'Submit',
+                      },
+                      btn_approve: {
+                        label: 'Approve',
+                        handler: onApproveAndUpload,
+                        className: 'bg-emerald-600 text-white hover:bg-emerald-700 disabled:bg-gray-200 disabled:text-gray-400',
+                        tooltip: 'Approve',
+                        dataTour: 'editor-approve-button',
+                        icon: <Check size={13} />,
+                      },
+                      btn_reject: {
+                        label: 'Reject',
+                        handler: onReject,
+                        className: 'bg-white text-red-600 border border-red-200 hover:bg-red-50 hover:border-red-300 disabled:bg-gray-50 disabled:text-gray-400',
+                        tooltip: 'Reject',
+                        dataTour: 'editor-reject-button',
+                        icon: <X size={13} />,
+                      },
+                      btn_revert: {
+                        label: 'Revert',
+                        handler: () => {
+                          setRevertComment('');
+                          setRevertCommentError('');
+                          setShowRevertModal(true);
+                        },
+                        className: 'bg-white text-amber-600 border border-amber-200 hover:bg-amber-50 hover:border-amber-300 disabled:bg-gray-50 disabled:text-gray-400 disabled:border-gray-200',
+                        disabledClassName: 'bg-gray-100 text-gray-400 border border-gray-200 cursor-not-allowed opacity-60',
+                        tooltip: isRevertLimitReached
+                          ? `Revert limit reached — ${usedRevertCount} of ${maxRevertCount} used`
+                          : `Revert to previous step`,
+                        icon: <ArrowLeft size={13} />,
+                        isRevertBtn: true,
+                      },
+                      btn_hold: {
+                        label: 'On Hold',
+                        handler: onHold,
+                        className: 'bg-white text-amber-600 border border-amber-200 hover:bg-amber-50 hover:border-amber-300 disabled:bg-gray-50 disabled:text-gray-400',
+                        tooltip: 'Place on hold',
+                        icon: <GitCompare size={13} />,
+                        dataTour: 'editor-hold-button',
+                      },
+                    };
 
-                  {/* Submit */}
-                  {!isWorkflowMissing && (!workflowConfig || workflowVisibleActions.has('btn_submit')) && (
-                    <button
-                      onClick={onSubmit}
-                      className="inline-flex items-center justify-center gap-1.5 px-3 py-1.5 rounded-lg font-medium text-[11px] cursor-pointer transition-all duration-200 ease-in-out bg-indigo-600 text-white hover:bg-indigo-700 disabled:opacity-40 disabled:cursor-not-allowed disabled:bg-gray-200 disabled:text-gray-400 max-sm:w-full shadow-sm"
-                      disabled={!isFormEditable}
-                      title={!isFormEditable ? editPermissionMessage : "Submit"}
-                    >
-                      Submit
-                    </button>
-                  )}
+                    if (!workflowConfig) {
+                      // No workflow config — show the static legacy set
+                      return Object.entries(ACTION_MAP).map(([ref, cfg]) => {
+                        if (cfg.onlyInitial && !isInitialStep) return null;
+                        const isRevertBlocked = cfg.isRevertBtn && isRevertLimitReached;
+                        const isDisabled = !isFormEditable || isRevertBlocked;
+                        const btnClass = cfg.isRevertBtn && isRevertLimitReached
+                          ? cfg.disabledClassName
+                          : cfg.className;
+                        const btnTitle = !isFormEditable ? editPermissionMessage : cfg.tooltip;
+                        return (
+                          <button
+                            key={ref}
+                            onClick={isRevertBlocked ? undefined : cfg.handler}
+                            className={`inline-flex items-center justify-center gap-1.5 px-3 py-1.5 rounded-lg font-medium text-[11px] cursor-pointer transition-all duration-200 ease-in-out disabled:opacity-40 disabled:cursor-not-allowed max-sm:w-full shadow-sm ${btnClass}`}
+                            disabled={isDisabled}
+                            title={btnTitle}
+                            data-tour={cfg.dataTour}
+                          >
+                            {cfg.icon && cfg.icon}{cfg.label}
+                          </button>
+                        );
+                      });
+                    }
 
-                  {/* Approve & Upload */}
-                  {!isWorkflowMissing && (!workflowConfig || workflowVisibleActions.has('btn_approve')) && (
-                    <button
-                      onClick={onApproveAndUpload}
-                      className="inline-flex items-center justify-center gap-1.5 px-3 py-1.5 rounded-lg font-medium text-[11px] cursor-pointer transition-all duration-200 ease-in-out bg-emerald-600 text-white hover:bg-emerald-700 disabled:opacity-40 disabled:cursor-not-allowed disabled:bg-gray-200 disabled:text-gray-400 max-sm:w-full shadow-sm"
-                      disabled={!isFormEditable}
-                      title={!isFormEditable ? editPermissionMessage : "Approve and upload"}
-                      data-tour="editor-approve-button"
-                    >
-                      Approve &amp; Upload
-                    </button>
-                  )}
+                    // Workflow-driven: render only buttons whose actionRef is visible to the current user
+                    return Object.entries(ACTION_MAP).map(([ref, cfg]) => {
+                      if (!workflowVisibleActions.has(ref)) return null;
+                      if (cfg.onlyInitial && !isInitialStep) return null;
+                      const isRevertBlocked = cfg.isRevertBtn && isRevertLimitReached;
+                      const isDisabled = !isFormEditable || isRevertBlocked;
+                      const btnClass = cfg.isRevertBtn && isRevertLimitReached
+                        ? cfg.disabledClassName
+                        : cfg.className;
+                      const btnTitle = !isFormEditable ? editPermissionMessage : cfg.tooltip;
+                      return (
+                        <button
+                          key={ref}
+                          onClick={isRevertBlocked ? undefined : cfg.handler}
+                          className={`inline-flex items-center justify-center gap-1.5 px-3 py-1.5 rounded-lg font-medium text-[11px] cursor-pointer transition-all duration-200 ease-in-out disabled:opacity-40 disabled:cursor-not-allowed max-sm:w-full shadow-sm ${btnClass}`}
+                          disabled={isDisabled}
+                          title={btnTitle}
+                          data-tour={cfg.dataTour}
+                        >
+                          {cfg.icon && cfg.icon}{cfg.label}
+                        </button>
+                      );
+                    });
+                  })()}
 
-                  {/* Reject */}
-                  {!isWorkflowMissing && (!workflowConfig || workflowVisibleActions.has('btn_reject')) && (
-                    <button
-                      onClick={onReject}
-                      className="inline-flex items-center justify-center gap-1.5 px-3 py-1.5 rounded-lg font-medium text-[11px] cursor-pointer transition-all duration-200 ease-in-out bg-white text-red-600 border border-red-200 hover:bg-red-50 hover:border-red-300 disabled:opacity-40 disabled:cursor-not-allowed disabled:bg-gray-50 disabled:text-gray-400 max-sm:w-full shadow-sm"
-                      disabled={!isFormEditable}
-                      title={!isFormEditable ? editPermissionMessage : "Reject"}
-                      data-tour="editor-reject-button"
-                    >
-                      Reject
-                    </button>
-                  )}
+                  {/* Cancel — always shown */}
+                  <button
+                    onClick={onCancel}
+                    className="inline-flex items-center justify-center gap-1.5 px-3 py-1.5 rounded-lg font-medium text-[11px] cursor-pointer transition-all duration-200 ease-in-out bg-white text-gray-500 border border-gray-200 hover:bg-gray-50 hover:text-gray-700 max-sm:w-full shadow-sm"
+                    title="Cancel and go back"
+                  >
+                    Cancel
+                  </button>
+                </div>
+              </div>
+            )}
 
-                  {/* On Hold */}
-                  {!isWorkflowMissing && (!workflowConfig || workflowVisibleActions.has('btn_hold')) && (
-                    <button
-                      onClick={onHold}
-                      className="inline-flex items-center justify-center gap-1.5 px-3 py-1.5 rounded-lg font-medium text-[11px] cursor-pointer transition-all duration-200 ease-in-out bg-white text-amber-600 border border-amber-200 hover:bg-amber-50 hover:border-amber-300 disabled:opacity-40 disabled:cursor-not-allowed disabled:bg-gray-50 disabled:text-gray-400 max-sm:w-full shadow-sm"
-                      disabled={!isFormEditable}
-                      title={!isFormEditable ? editPermissionMessage : "Hold"}
-                      data-tour="editor-hold-button"
-                    >
-                      <GitCompare size={13} /> On Hold
-                    </button>
-                  )}
+            {/* ── Revert Confirmation Modal ── */}
+            {showRevertModal && (
+              <div className="fixed inset-0 z-[10001] bg-black/40 flex items-center justify-center px-4">
+                <div className="bg-white rounded-xl shadow-2xl w-full max-w-md border border-gray-100 overflow-hidden animate-in fade-in zoom-in duration-200">
 
-                  {/* Cancel */}
-                  {(isWorkflowMissing || !workflowConfig || isInitialStep) && (
+                  {/* Modal Header */}
+                  <div className="flex items-start gap-3 px-5 pt-5 pb-4 border-b border-gray-100">
+                    <div className="flex-shrink-0 w-9 h-9 rounded-full bg-amber-50 border border-amber-100 flex items-center justify-center">
+                      <ArrowLeft size={16} className="text-amber-600" />
+                    </div>
+                    <div className="flex-1 min-w-0">
+                      <h3 className="text-[13px] font-semibold text-gray-800 leading-snug">Confirm Revert</h3>
+                      <p className="text-[11px] text-gray-500 mt-0.5 leading-relaxed">
+                        This will send the record back to the previous step for corrections. Please provide a reason so the initiator knows what to fix.
+                      </p>
+                      {/* Revert usage pill inside modal */}
+                      {(isSpocUser || isAdminUser) && (
+                        <div className={`mt-2 inline-flex items-center gap-1.5 px-2 py-1 rounded-md text-[10px] font-semibold border ${
+                          revertsLeft === 1
+                            ? 'bg-amber-50 border-amber-200 text-amber-700'
+                            : 'bg-gray-50 border-gray-200 text-gray-600'
+                        }`}>
+                          <span>Reverts used:</span>
+                          {/* mini dots */}
+                          <span className="flex items-center gap-0.5">
+                            {Array.from({ length: maxRevertCount }).map((_, i) => (
+                              <span
+                                key={i}
+                                className={`block w-2 h-2 rounded-full ${
+                                  i < usedRevertCount
+                                    ? revertsLeft === 1 ? 'bg-amber-500' : 'bg-amber-400'
+                                    : 'bg-gray-200'
+                                }`}
+                              />
+                            ))}
+                          </span>
+                          <span className="font-bold tabular-nums">{usedRevertCount}/{maxRevertCount}</span>
+                          <span className="text-gray-400 font-normal">·</span>
+                          <span className={revertsLeft === 1 ? 'text-amber-600' : 'text-gray-500'}>
+                            {revertsLeft === 1 ? 'Last revert left' : `${revertsLeft} reverts left`}
+                          </span>
+                        </div>
+                      )}
+                    </div>
                     <button
-                      onClick={onCancel}
-                      className="inline-flex items-center justify-center gap-1.5 px-3 py-1.5 rounded-lg font-medium text-[11px] cursor-pointer transition-all duration-200 ease-in-out bg-white text-gray-500 border border-gray-200 hover:bg-gray-50 hover:text-gray-700 max-sm:w-full shadow-sm"
-                      title="Cancel and go back"
+                      onClick={() => setShowRevertModal(false)}
+                      className="flex-shrink-0 ml-auto p-1 rounded-md text-gray-400 hover:text-gray-600 hover:bg-gray-100 transition-colors"
+                    >
+                      <X size={15} />
+                    </button>
+                  </div>
+
+                  {/* Modal Body */}
+                  <div className="px-5 py-4">
+                    <div className="flex justify-between items-center mb-1.5">
+                      <label className="text-[11px] font-medium text-gray-600 flex items-center gap-1">
+                        Revert Reason
+                        <span className="text-red-400 text-[10px]">*</span>
+                      </label>
+                      <span className={`text-[10px] tabular-nums ${revertComment.length > 270 ? 'text-amber-500' : 'text-gray-400'}`}>
+                        {revertComment.length}/300
+                      </span>
+                    </div>
+                    <textarea
+                      autoFocus
+                      value={revertComment}
+                      onChange={(e) => {
+                        if (e.target.value.length <= 300) {
+                          setRevertComment(e.target.value);
+                          if (revertCommentError) setRevertCommentError('');
+                        }
+                      }}
+                      rows={4}
+                      maxLength={300}
+                      placeholder="Explain why this record is being reverted…"
+                      className={`w-full px-3 py-2 border rounded-lg text-[11px] font-normal text-gray-700 bg-white transition-all duration-200 focus:outline-none focus:ring-2 resize-none placeholder-gray-300 ${
+                        revertCommentError
+                          ? 'border-red-300 focus:border-red-400 focus:ring-red-100 bg-red-50/30'
+                          : 'border-gray-200 focus:border-amber-400 focus:ring-amber-100 hover:border-gray-300'
+                      }`}
+                    />
+                    {revertCommentError && (
+                      <div className="mt-1.5 flex items-center gap-1 text-[10px] text-red-500">
+                        <svg className="w-3 h-3 flex-shrink-0" fill="currentColor" viewBox="0 0 20 20">
+                          <path fillRule="evenodd" d="M18 10a8 8 0 11-16 0 8 8 0 0116 0zm-7 4a1 1 0 11-2 0 1 1 0 012 0zm-1-9a1 1 0 00-1 1v4a1 1 0 102 0V6a1 1 0 00-1-1z" clipRule="evenodd" />
+                        </svg>
+                        {revertCommentError}
+                      </div>
+                    )}
+                    <p className="mt-2 text-[10px] text-gray-400">
+                      This comment will be visible to the initiator in the approval history.
+                    </p>
+                  </div>
+
+                  {/* Modal Footer */}
+                  <div className="flex justify-end items-center gap-2 px-5 py-3 bg-gray-50 border-t border-gray-100">
+                    <button
+                      onClick={() => {
+                        setShowRevertModal(false);
+                        setRevertComment('');
+                        setRevertCommentError('');
+                      }}
+                      className="inline-flex items-center justify-center px-4 py-1.5 rounded-lg text-[11px] font-medium text-gray-600 bg-white border border-gray-200 hover:bg-gray-50 transition-all duration-150 shadow-sm"
                     >
                       Cancel
                     </button>
-                  )}
+                    <button
+                      onClick={() => {
+                        const trimmed = revertComment.trim();
+                        if (!trimmed) {
+                          setRevertCommentError('Please provide a reason for reverting.');
+                          return;
+                        }
+                        if (trimmed.length < 5) {
+                          setRevertCommentError('Reason must be at least 5 characters.');
+                          return;
+                        }
+                        setShowRevertModal(false);
+                        setRevertComment('');
+                        setRevertCommentError('');
+                        // Pass the revert reason directly to the handler.
+                        // VendorEditor.handleRevert(reason) saves it to both
+                        // action_comments (churn_policy) and user_comments (ap_process_workflow_history).
+                        onRevert(trimmed);
+                      }}
+                      className="inline-flex items-center justify-center gap-1.5 px-4 py-1.5 rounded-lg text-[11px] font-medium text-white bg-amber-500 hover:bg-amber-600 border border-amber-500 hover:border-amber-600 transition-all duration-150 shadow-sm"
+                    >
+                      <ArrowLeft size={12} />
+                      Confirm Revert
+                    </button>
+                  </div>
+
                 </div>
               </div>
             )}

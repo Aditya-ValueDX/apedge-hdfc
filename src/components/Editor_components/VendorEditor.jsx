@@ -17,6 +17,13 @@ import useVendorWorkflow from '../../hooks/useVendorWorkflow';
 import WorkflowStepper from '../common/Workflowstepper';
 
 // ---------------------------------------------------------------------------
+// MAX_REVERT_COUNT — Global cap on how many times a role can revert a record.
+// spoc  → checked against churn_policy.approver_revert_count
+// admin → checked against churn_policy.admin_revert_count
+// ---------------------------------------------------------------------------
+const MAX_REVERT_COUNT = 3;
+
+// ---------------------------------------------------------------------------
 // applyWorkflowStepOverrides
 // Applies step-level field overrides from workflowConfig onto fieldConfig.
 // ---------------------------------------------------------------------------
@@ -126,6 +133,10 @@ const VendorEditor = () => {
     const [policyStatus, setPolicyStatus] = useState('');
     const [policyStage, setPolicyStage] = useState('');
 
+    // Revert count state (read from churn_policy DB columns)
+    const [approverRevertCount, setApproverRevertCount] = useState(0); // for spoc
+    const [adminRevertCount, setAdminRevertCount] = useState(0);       // for admin
+
     // Workflow state
     const [instanceId, setInstanceId] = useState(null);
     const [currentWorkflowStepId, setCurrentWorkflowStepId] = useState(null);
@@ -167,22 +178,18 @@ const VendorEditor = () => {
     const completedStepStatuses = useMemo(() => {
         if (!workflowConfig || !Array.isArray(workflowConfig.steps)) return {};
         const steps = workflowConfig.steps;
-        const activeIndex = currentWorkflowStepId ? steps.findIndex(s => s.stepId === currentWorkflowStepId) : 0;
+        const activeIndex = currentWorkflowStepId ? steps.findIndex(s => s.stepId === currentWorkflowStepId) : -1;
         const result = {};
+        
         steps.forEach((step, idx) => {
-            if (idx >= activeIndex) return;
-            const ft = (step.transitions || []).find(t => { const n = t.dataUpdates?.next_step; return n && n !== step.stepId; });
-            if (ft?.dataUpdates?.status) result[step.stepId] = ft.dataUpdates.status;
+            // Include completed steps (those with a status in dataUpdates)
+            if (step.dataUpdates?.status) {
+                result[step.stepId] = step.dataUpdates.status;
+            }
         });
-        if (isWorkflowCompleted) {
-            steps.forEach(step => {
-                if (result[step.stepId]) return;
-                const ft = (step.transitions || []).find(t => { const n = t.dataUpdates?.next_step; return n && n !== step.stepId; });
-                if (ft?.dataUpdates?.status) result[step.stepId] = ft.dataUpdates.status;
-            });
-        }
+        
         return result;
-    }, [workflowConfig, currentWorkflowStepId, isWorkflowCompleted]);
+    }, [workflowConfig, currentWorkflowStepId]);
 
     // ---------------------------------------------------------------------------
     // Permissions
@@ -193,7 +200,7 @@ const VendorEditor = () => {
     const isWorkflowMissing = !workflowLoading && (!workflowConfig || !workflowConfig.meta || typeof workflowConfig.meta !== 'object' || Array.isArray(workflowConfig.meta));
     const roleHasEditPermission = isWorkflowConfigReady
         ? (Array.isArray(workflowEditRoles) && workflowEditRoles.includes(userRole))
-        : (userRole === 'super_admin' || userRole === 'tenant_admin' || canUserEdit(userRole, 'vendor_approve_reject'));
+        : (userRole === 'super_admin' || userRole === 'admin' || canUserEdit(userRole, 'vendor_approve_reject'));
     const roleIsReadOnly = isWorkflowConfigReady ? (!roleHasEditPermission && Array.isArray(workflowReadRoles) && workflowReadRoles.includes(userRole)) : false;
     const isReadonly = roleIsReadOnly || location.state?.readonly === true;
     const canEditInvoice = !isReadonly && roleHasEditPermission;
@@ -203,7 +210,7 @@ const VendorEditor = () => {
     // ---------------------------------------------------------------------------
     useEffect(() => {
         if (!rawFieldConfig.length) return;
-        setFieldConfig(applyWorkflowStepOverrides(rawFieldConfig, workflowConfig, instanceId ? currentWorkflowStepId : null));
+        setFieldConfig(applyWorkflowStepOverrides(rawFieldConfig, workflowConfig, currentWorkflowStepId));
     }, [rawFieldConfig, workflowConfig, currentWorkflowStepId, instanceId]);
 
     // ---------------------------------------------------------------------------
@@ -427,7 +434,7 @@ const VendorEditor = () => {
 
     const handleFileSelect = (selectedFiles) => {
         if (!selectedFiles?.length) return;
-        const isSuperAdmin = user.role === 'super_admin' || user.role === 'tenant_admin';
+        const isSuperAdmin = user.role === 'super_admin' || user.role === 'admin';
         if (!isSuperAdmin && !canUserEdit(user.role, 'upload_document')) { toast.error('No permission to upload.'); return; }
         const slots = 10 - (pendingFiles?.length || 0);
         const toProcess = Array.from(selectedFiles).slice(0, slots);
@@ -511,6 +518,10 @@ const VendorEditor = () => {
                 setPolicyStatus(row.policy_status || row.status || '');
                 setPolicyStage(row.stage || '');
 
+                // Populate role-specific revert counts from DB
+                setApproverRevertCount(row.approver_revert_count ?? 0); // spoc counter
+                setAdminRevertCount(row.admin_revert_count ?? 0);       // admin counter
+
                 if (row.instance_id) {
                     setInstanceId(row.instance_id);
                     try {
@@ -525,7 +536,7 @@ const VendorEditor = () => {
                             const userIds = [...new Set(histRes.data.map(h => h.created_by).filter(Boolean))];
                             const userMap = {};
                             await Promise.all(userIds.map(async uid => {
-                                try { const u = await axios.get(`/api/v1/tables/ap_users?id=eq.${uid}&select=id,name,email`, { headers: authHeaders }); userMap[uid] = u.data?.[0]?.name || u.data?.[0]?.email || String(uid); }
+                                try { const u = await axios.get(`/api/v1/tables/ap_users?id=eq.${uid}&select=id,email`, { headers: authHeaders }); userMap[uid] = u.data?.[0]?.name || u.data?.[0]?.email || String(uid); }
                                 catch { userMap[uid] = String(uid); }
                             }));
                             setWorkflowHistory(histRes.data.map(h => ({ ...h, created_by_name: userMap[h.created_by] || String(h.created_by) })));
@@ -641,7 +652,7 @@ const VendorEditor = () => {
             setErrors(newErrors); return { isValid, firstInvalidFieldId: firstId };
         }
 
-        const actionRefMap = { draft: 'btn_Draft', submit: 'btn_SUBMIT', approve: 'btn_Approve', reject: 'btn_reject' };
+        const actionRefMap = { draft: 'btn_Draft', submit: 'btn_SUBMIT', approve: 'btn_Approve', reject: 'btn_reject', revert: 'btn_revert' };
         const actionRef = action.startsWith('btn_') ? action : (actionRefMap[action] ?? null);
         const wfRequired = actionRef ? getWorkflowActionRequiredFields(workflowConfig, currentWorkflowStepId ?? null, actionRef, rawFieldConfig) : new Set();
         const knownNames = new Set(fieldConfig.map(f => f.field_name));
@@ -768,8 +779,16 @@ const VendorEditor = () => {
     // ---------------------------------------------------------------------------
     const resolveWorkflowStep = useCallback((actionRef, currentStepId) => {
         const steps = workflowConfig?.steps || [];
-        if (!steps.length) return { current_step: 'step_initiate', next_step: 'step_initiate', status: 'Draft' };
-        if (!actionRef || actionRef === 'draft') { const f = steps[0]; return { current_step: f.stepId, next_step: f.stepId, status: 'Draft' }; }
+        if (!steps.length) return { current_step: null, next_step: null, status: null, pending_with: null };
+        if (!actionRef || actionRef === 'draft') { 
+            const f = steps[0]; 
+            return { 
+                current_step: f?.stepId || null, 
+                next_step: f?.stepId || null, 
+                status: f?.dataUpdates?.status || null, 
+                pending_with: f?.dataUpdates?.pending_with || null 
+            };
+        }
         const cs = steps.find(s => s.stepId === currentStepId) || steps[0];
         const csi = steps.indexOf(cs);
         const matched = (cs.transitions || []).find(t => t.actionRef?.toLowerCase() === actionRef?.toLowerCase());
@@ -780,20 +799,31 @@ const VendorEditor = () => {
             const rco = steps.find(s => s.stepId === rc);
             const rci = rco ? steps.indexOf(rco) : -1;
             const rn = rci >= 0 ? steps[rci + 1]?.stepId ?? null : null;
-            return { current_step: rc, next_step: rn, status: du.status || 'In Progress' };
+            return { 
+                current_step: rc, 
+                next_step: rn, 
+                status: du.status || null,
+                pending_with: du.pending_with || null
+            };
         }
-        const na = actionRef?.toLowerCase();
-        const fb = na === 'btn_submit' ? 'Submitted' : na === 'btn_approve' ? 'Approved' : na === 'btn_reject' ? 'Rejected' : 'In Progress';
-        const no = steps[csi + 1]; const nno = no ? steps[csi + 2] : null;
-        return { current_step: no?.stepId || cs.stepId, next_step: nno?.stepId ?? null, status: fb };
+        // Fallback to current step if no matching transition is found
+        return { 
+            current_step: currentStepId || steps[0]?.stepId || null, 
+            next_step: steps[csi + 1]?.stepId || null, 
+            status: cs?.dataUpdates?.status || null, 
+            pending_with: cs?.dataUpdates?.pending_with || null 
+        };
     }, [workflowConfig]);
 
     const createWorkflowInstance = async (actionRef, status, overrideStep = null) => {
         const nowIso = getCurrentTimeISOString();
-        const { current_step, next_step } = resolveWorkflowStep(actionRef, overrideStep || 'step_initiate');
+        const firstStepId = workflowConfig?.steps?.[0]?.stepId || null;
+        const resolvedStepId = overrideStep || firstStepId;
+        const { current_step, next_step, pending_with } = resolveWorkflowStep(actionRef, resolvedStepId);
         const res = await axios.post('/api/v1/tables/ap_process_workflow_instances', [{
             tenant_id: user.tenantId, module_name: 'Churn Policy', Process_name: 'Churn Policy Onboarding',
-            current_step, next_step, status, created_by: user.user_id, created_at: nowIso,
+            current_step: current_step || null, next_step: next_step || null, status: status || null, pending_with: pending_with || null,
+            created_by: user.user_id, created_at: nowIso,
             updated_by: user.user_id, updated_at: nowIso, is_active: true,
         }], { headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}`, Prefer: 'return=representation' } });
         if (!res.data) throw new Error('Workflow instance creation failed.');
@@ -803,14 +833,14 @@ const VendorEditor = () => {
     const postWorkflowHistory = async (resolvedInstanceId, actionRef, previousStep, currentFormData) => {
         if (!resolvedInstanceId || !user) return;
         try {
-            const { current_step: nextStep, status: resolvedStatus } = resolveWorkflowStep(actionRef, previousStep);
+            const { current_step: nextStep, status: resolvedStatus, pending_with: resolvedPendingWith } = resolveWorkflowStep(actionRef, previousStep);
             const hj = {};
             Object.keys(changedFieldsRef.current).forEach(k => { if (currentFormData?.hasOwnProperty(k)) hj[k] = currentFormData[k]; });
             await axios.post('/api/v1/tables/ap_process_workflow_history', [{
                 tenant_id: user.tenantId, instance_id: resolvedInstanceId,
                 module_name: 'Churn Policy', Process_name: 'Churn Policy Onboarding',
                 created_by: user.user_id, created_role_name: user.role || '',
-                previous_step: previousStep || 'step_initiate', next_step: nextStep || null,
+                previous_step: previousStep || null, next_step: nextStep || null,
                 actionRef, user_comments: rejectionComment || null, status: resolvedStatus || null,
                 history_json: Object.keys(hj).length > 0 ? hj : null,
             }], { headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}`, Prefer: 'return=representation' } });
@@ -819,19 +849,29 @@ const VendorEditor = () => {
     };
 
     const updateWorkflowInstance = async (existingInstanceId, actionRef, status, currentStepId) => {
-        const { current_step, next_step } = resolveWorkflowStep(actionRef, currentStepId);
+        const { current_step, next_step, pending_with } = resolveWorkflowStep(actionRef, currentStepId);
         const steps = workflowConfig?.steps || [];
         const isTerminal = current_step && !steps.find(s => s.stepId === current_step);
         const hj = {};
         Object.keys(changedFieldsRef.current).forEach(k => { if (formData?.hasOwnProperty(k)) hj[k] = formData[k]; });
-        const { status: transitionStatus } = resolveWorkflowStep(actionRef, currentStepId);
-        const res = await axios.patch(`/api/vendor/approval/${existingInstanceId}`, {
-            instance: { tenantId: user.tenantId, updatedBy: user.user_id, currentStep: current_step, nextStep: next_step ?? null, status, ...(isTerminal && { isActive: false }) },
-            history: { createdRoleName: user.role || '', previousStep: currentStepId || 'step_initiate', nextStep: current_step ?? null, actionRef, userComments: rejectionComment || null, status: transitionStatus || status, historyJson: Object.keys(hj).length > 0 ? hj : {} },
+        const { status: transitionStatus, pending_with: transitionPendingWith } = resolveWorkflowStep(actionRef, currentStepId);
+        const nowIso = getCurrentTimeISOString();
+        const res = await axios.patch(`/api/v1/tables/ap_process_workflow_instances?instance_id=eq.${existingInstanceId}`, {
+            current_step: current_step || null, next_step: next_step || null, status: status || null, pending_with: pending_with || null,
+            updated_by: user.user_id, updated_at: nowIso,
+            ...(isTerminal && { is_active: false }),
         }, { headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` } });
+        await axios.post('/api/v1/tables/ap_process_workflow_history', [{
+            tenant_id: user.tenantId, instance_id: existingInstanceId,
+            module_name: 'Churn Policy', Process_name: 'Churn Policy Onboarding',
+            created_by: user.user_id, created_role_name: user.role || '',
+            previous_step: currentStepId || null, next_step: current_step || null,
+            actionRef, user_comments: rejectionComment || null, status: transitionStatus || status,
+            history_json: Object.keys(hj).length > 0 ? hj : null,
+        }], { headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}`, Prefer: 'return=representation' } });
         if (res.status < 200 || res.status >= 300) throw new Error(`Workflow update error: ${res.status}`);
         changedFieldsRef.current = {};
-        return { current_step, next_step, status };
+        return { current_step, next_step, status, pending_with };
     };
 
     // ---------------------------------------------------------------------------
@@ -863,14 +903,15 @@ const VendorEditor = () => {
         try {
             const nowIso = getCurrentTimeISOString();
             const authHeaders = { 'Content-Type': 'application/json', Authorization: `Bearer ${token}`, Prefer: 'return=representation' };
-            const actionRef = status === 'Draft' ? 'draft' : 'btn_submit';
-            const { status: wfStatus } = resolveWorkflowStep(actionRef, 'step_initiate');
+            const firstStepId = workflowConfig?.steps?.[0]?.stepId || null;
+            const actionRef = status === 'Draft' ? 'btn_draft' : 'btn_submit';
+            const { status: wfStatus, pending_with: wfPendingWith } = resolveWorkflowStep(actionRef, firstStepId);
             const effectiveStatus = wfStatus || status;
-            const instanceData = await createWorkflowInstance(actionRef, effectiveStatus, 'step_initiate');
+            const instanceData = await createWorkflowInstance(actionRef, effectiveStatus, firstStepId);
             const createdInstanceId = instanceData?.instance_id;
             if (!createdInstanceId) throw new Error('No instance_id returned from workflow instance creation.');
             setInstanceId(createdInstanceId);
-            await postWorkflowHistory(createdInstanceId, actionRef, 'step_initiate', formData);
+            await postWorkflowHistory(createdInstanceId, actionRef, firstStepId, formData);
             await uploadAllFiles(createdInstanceId);
             const policyPayload = {
                 ...buildChurnPayload(),
@@ -888,19 +929,23 @@ const VendorEditor = () => {
         } catch (err) { toast.error(`Failed to create policy: ${err.message}`); return false; }
     };
 
-    const updatePolicy = async (status, stage, extraData = {}, actionRefOverride = null, currentStepIdOverride = null) => {
+    const updatePolicy = async (status, stage, extraData = {}, actionRefOverride = null, currentStepIdOverride = null, revertCountUpdates = {}) => {
         if (!canEditInvoice) { toast.error('No permission.'); return false; }
         try {
             const nowIso = getCurrentTimeISOString();
             const authHeaders = { 'Content-Type': 'application/json', Authorization: `Bearer ${token}`, Prefer: 'return=representation' };
-            let currentStepId = currentStepIdOverride || 'step_initiate';
+            let currentStepId = currentStepIdOverride;
             if (!currentStepIdOverride && instanceId) {
                 try { const r = await axios.get(`/api/v1/tables/ap_process_workflow_instances?instance_id=eq.${instanceId}`, { headers: { Authorization: `Bearer ${token}` } }); if (r.data?.[0]?.current_step) currentStepId = r.data[0].current_step; }
                 catch { /* fallback */ }
             }
-            const actionRefMap = { Draft: 'draft', Submitted: 'btn_submit', Approved: 'btn_approve', Rejected: 'btn_reject', Hold: 'btn_hold', reconciled: 'btn_approve' };
-            const actionRef = actionRefOverride || actionRefMap[status] || 'draft';
-            const { status: wfStatus } = resolveWorkflowStep(actionRef, currentStepId);
+            // Use first step from workflow config as fallback if no current step is found
+            const firstStepId = workflowConfig?.steps?.[0]?.stepId || null;
+            currentStepId = currentStepId || firstStepId;
+            
+            const actionRefMap = { Draft: 'btn_draft', Submitted: 'btn_submit', Approved: 'btn_approve', Rejected: 'btn_reject', Hold: 'btn_hold', Reverted: 'btn_revert', reconciled: 'btn_approve' };
+            const actionRef = actionRefOverride || actionRefMap[status] || 'btn_draft';
+            const { status: wfStatus, pending_with: wfPendingWith } = resolveWorkflowStep(actionRef, currentStepId);
             const effectiveStatus = wfStatus || status;
             if (instanceId) await updateWorkflowInstance(instanceId, actionRef, effectiveStatus, currentStepId);
             await uploadAllFiles(instanceId);
@@ -909,6 +954,8 @@ const VendorEditor = () => {
                 policy_status: effectiveStatus, instance_id: instanceId,
                 tenant_id: user.tenantId, updated_at: nowIso, updated_by: user.user_id,
                 ...(extraData.comments ? { action_comments: extraData.comments } : rejectionComment ? { action_comments: rejectionComment } : {}),
+                // Include role-specific revert counter updates when provided
+                ...(Object.keys(revertCountUpdates).length > 0 ? revertCountUpdates : {}),
             };
             const res = await axios.patch(`/api/v1/tables/churn_policy?churn_policy_id=eq.${policyPk}`, patchPayload, { headers: authHeaders });
             if (res.status < 200 || res.status >= 300) throw new Error(`Update error: ${res.status}`);
@@ -925,7 +972,8 @@ const VendorEditor = () => {
             const { isValid, firstInvalidFieldId: fid } = validateForm('draft');
             setFirstInvalidField(fid);
             if (!isValid) { toast.error('Please correct validation errors before saving draft.'); return; }
-            const { status: draftStatus } = resolveWorkflowStep('draft', 'step_initiate');
+            const firstStepId = workflowConfig?.steps?.[0]?.stepId || null;
+            const { status: draftStatus, pending_with: draftPendingWith } = resolveWorkflowStep('btn_draft', firstStepId);
             const success = policyId ? await updatePolicy(draftStatus || 'Draft', 'New') : await createNewPolicy(draftStatus || 'Draft', 'New');
             if (success) { toast.success('Policy saved as draft.'); navigate('/vendor_queue'); }
             else toast.error('Failed to save draft.');
@@ -938,9 +986,10 @@ const VendorEditor = () => {
         try {
             const { isValid } = validateForm('submit');
             if (!isValid) { toast.error('Please correct validation errors before submitting.'); return; }
-            const nsv = validateWorkflowNextStep(workflowConfig, 'step_initiate', 'btn_submit');
+            const firstStepId = workflowConfig?.steps?.[0]?.stepId || null;
+            const nsv = validateWorkflowNextStep(workflowConfig, firstStepId, 'btn_submit');
             if (!nsv.isValid) { toast.error(nsv.message, { autoClose: 5000 }); return; }
-            const { status: submitStatus } = resolveWorkflowStep('btn_submit', 'step_initiate');
+            const { status: submitStatus } = resolveWorkflowStep('btn_submit', firstStepId);
             const success = policyId ? await updatePolicy(submitStatus || 'Submitted', 'Review') : await createNewPolicy(submitStatus || 'Submitted', 'Review');
             if (success) { toast.success('Policy submitted.'); navigate('/vendor_queue'); }
             else toast.error('Failed to submit policy.');
@@ -954,7 +1003,8 @@ const VendorEditor = () => {
         if (!isValid) { setProcessMessage('Please correct fields before proceeding.'); setProcessStatus('error'); setProcessing(true); setTimeout(() => { setProcessing(false); setProcessMessage(''); setProcessStatus(''); }, 1000); return; }
         setProcessMessage('Processing approval...'); setProcessStatus('processing'); setProcessing(true);
         try {
-            let csid = 'step_initiate';
+            const firstStepId = workflowConfig?.steps?.[0]?.stepId || null;
+            let csid = firstStepId;
             if (instanceId) { try { const r = await axios.get(`/api/v1/tables/ap_process_workflow_instances?instance_id=eq.${instanceId}`, { headers: { Authorization: `Bearer ${token}` } }); if (r.data?.[0]?.current_step) csid = r.data[0].current_step; } catch { /* fallback */ } }
             const nsv = validateWorkflowNextStep(workflowConfig, csid, 'btn_approve');
             if (!nsv.isValid) { toast.error(nsv.message, { autoClose: 5000 }); setProcessing(false); setProcessMessage(''); setProcessStatus(''); return; }
@@ -978,7 +1028,8 @@ const VendorEditor = () => {
     };
 
     const runAction = async (actionRef, statusLabel) => {
-        let csid = 'step_initiate';
+        const firstStepId = workflowConfig?.steps?.[0]?.stepId || null;
+        let csid = firstStepId;
         if (instanceId) { try { const r = await axios.get(`/api/v1/tables/ap_process_workflow_instances?instance_id=eq.${instanceId}`, { headers: { Authorization: `Bearer ${token}` } }); if (r.data?.[0]?.current_step) csid = r.data[0].current_step; } catch { /* fallback */ } }
         const { status: wfStatus } = resolveWorkflowStep(actionRef, csid);
         return updatePolicy(wfStatus || statusLabel, 'Review', { comments: rejectionComment }, actionRef, csid);
@@ -988,6 +1039,59 @@ const VendorEditor = () => {
     const cancelRejectPolicy = () => setShowRejectionModal(false);
     const confirmHoldPolicy = async () => { setShowHoldModal(false); setProcessMessage('Placing on hold...'); setProcessStatus('processing'); setProcessing(true); const ok = await runAction('btn_hold', 'Hold'); if (ok) { setProcessMessage('Policy placed on hold.'); setProcessStatus('success'); navigate('/vendor_queue'); } else { setProcessMessage('Failed to place on hold.'); setProcessStatus('error'); setTimeout(() => { setProcessing(false); setProcessMessage(''); setProcessStatus(''); }, 3000); } };
     const cancelHoldPolicy = () => setShowHoldModal(false);
+    const handleRevert = async (revertReason) => {
+        // revertReason comes from the VendorFormUI revert modal.
+        // Set it on the rejectionComment state so runAction picks it up for both
+        // action_comments (churn_policy) and user_comments (ap_process_workflow_history).
+        if (revertReason) setRejectionComment(revertReason);
+
+        // ── Revert count guard ──────────────────────────────────────────────
+        // spoc uses approver_revert_count; admin uses admin_revert_count.
+        // Block the action if the relevant counter has already reached the cap.
+        const isSpoc  = userRole === 'spoc';
+        const isAdmin = userRole === 'admin' || userRole === 'super_admin';
+        if (isSpoc && approverRevertCount >= MAX_REVERT_COUNT) {
+            toast.error(`Revert limit reached. You can only revert ${MAX_REVERT_COUNT} time(s).`);
+            return;
+        }
+        if (isAdmin && adminRevertCount >= MAX_REVERT_COUNT) {
+            toast.error(`Revert limit reached. You can only revert ${MAX_REVERT_COUNT} time(s).`);
+            return;
+        }
+        // ────────────────────────────────────────────────────────────────────
+
+        const { isValid, firstInvalidFieldId: fid } = validateForm('revert');
+        if (!isValid) { setFirstInvalidField(fid); setProcessMessage('Please fix validation errors before reverting.'); setProcessStatus('error'); setProcessing(true); setTimeout(() => { setProcessing(false); setProcessMessage(''); setProcessStatus(''); }, 1500); return; }
+        setProcessMessage('Reverting...'); setProcessStatus('processing'); setProcessing(true);
+        // Build a local runAction call using the revertReason directly to avoid
+        // any state-update timing issue (setState is async).
+        const firstStepId = workflowConfig?.steps?.[0]?.stepId || null;
+        let csid = firstStepId;
+        if (instanceId) {
+            try {
+                const r = await axios.get(`/api/v1/tables/ap_process_workflow_instances?instance_id=eq.${instanceId}`, { headers: { Authorization: `Bearer ${token}` } });
+                if (r.data?.[0]?.current_step) csid = r.data[0].current_step;
+            } catch { /* fallback */ }
+        }
+        const { status: wfStatus } = resolveWorkflowStep('btn_revert', csid);
+        const comment = revertReason || rejectionComment;
+
+        // Compute the incremented counter for the acting role
+        const newApproverRevertCount = isSpoc  ? approverRevertCount + 1 : approverRevertCount;
+        const newAdminRevertCount    = isAdmin ? adminRevertCount    + 1 : adminRevertCount;
+
+        const ok = await updatePolicy(
+            wfStatus || 'Reverted', 'Review', { comments: comment }, 'btn_revert', csid,
+            { approver_revert_count: newApproverRevertCount, admin_revert_count: newAdminRevertCount }
+        );
+        if (ok) {
+            // Optimistically update local state so the UI reflects the new count immediately
+            if (isSpoc)  setApproverRevertCount(newApproverRevertCount);
+            if (isAdmin) setAdminRevertCount(newAdminRevertCount);
+            setProcessMessage('Policy reverted.'); setProcessStatus('success'); navigate('/vendor_queue');
+        } else { setProcessMessage('Failed to revert.'); setProcessStatus('error'); setTimeout(() => { setProcessing(false); setProcessMessage(''); setProcessStatus(''); }, 3000); }
+    };
+
     const handleSendToReconciliation = async () => { setProcessMessage('Processing for reconciliation...'); setProcessStatus('processing'); setProcessing(true); const ok = await updatePolicy('reconciled', 'Review'); if (ok) { setProcessMessage('Sent to reconciliation.'); setProcessStatus('success'); navigate('/vendor_queue'); } else { setProcessMessage('Failed.'); setProcessStatus('error'); setTimeout(() => { setProcessing(false); setProcessMessage(''); setProcessStatus(''); }, 3000); } };
     const handleCancel = () => navigate('/vendor_queue');
     const handleBack = () => navigate(location.state?.from ?? '/vendor_queue');
@@ -1059,7 +1163,7 @@ const VendorEditor = () => {
 
             {/* Header */}
             <div data-tour="editor-header">
-                <div className="flex flex-wrap gap-y-2 justify-between border items-center px-4 py-2 z-[100] bg-white shadow-md">
+                <div className="flex flex-wrap gap-y-2 justify-between border items-center px-4 py-1 z-[100] bg-white shadow-md">
                     <button onClick={handleBack} className="flex text-[12px] items-center gap-1 px-2 py-1 bg-blue-500 border border-blue-600 rounded-md shadow-sm hover:bg-blue-600 transition-all duration-200 focus:outline-none">
                         <ArrowLeft size={16} className="text-white" /><span className="font-medium text-white">Back</span>
                     </button>
@@ -1074,7 +1178,7 @@ const VendorEditor = () => {
 
                 <WorkflowStepper
                     workflowConfig={workflowConfig}
-                    currentWorkflowStepId={instanceId ? currentWorkflowStepId : null}
+                    currentWorkflowStepId={currentWorkflowStepId}
                     isCompleted={isWorkflowCompleted}
                     completedStepStatuses={completedStepStatuses}
                 />
@@ -1095,6 +1199,7 @@ const VendorEditor = () => {
                     onLineItemAdd={handleLineItemAdd}
                     onLineItemDelete={handleLineItemDelete}
                     onReject={handleReject}
+                    onRevert={handleRevert}
                     onHold={handleHold}
                     onSendToReconciliation={handleSendToReconciliation}
                     onApproveAndUpload={handleApproveAndUpload}
@@ -1136,11 +1241,14 @@ const VendorEditor = () => {
                     vendorStatus={policyStatus}
                     vendorStage={policyStage}
                     workflowConfig={workflowConfig}
-                    currentWorkflowStepId={instanceId ? currentWorkflowStepId : null}
+                    currentWorkflowStepId={currentWorkflowStepId}
                     instanceId={instanceId}
                     isWorkflowCompleted={isWorkflowCompleted}
                     workflowHistory={workflowHistory}
                     isWorkflowMissing={isWorkflowMissing}
+                    maxRevertCount={MAX_REVERT_COUNT}
+                    approverRevertCount={approverRevertCount}
+                    adminRevertCount={adminRevertCount}
                 />
             </div>
 

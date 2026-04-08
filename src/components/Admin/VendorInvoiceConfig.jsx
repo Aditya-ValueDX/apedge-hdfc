@@ -712,8 +712,8 @@ const VendorInvoiceConfig = () => {
   const token = useSelector(state => state.auth.token);
 
   // Updated permissions logic
-  const canEditInvoiceConfig = (userRole === 'super_admin') || (userRole === 'tenant_admin');
-  const canDeleteInvoiceConfig = (userRole === 'super_admin') || (userRole === 'tenant_admin');
+  const canEditInvoiceConfig = (userRole === 'super_admin') || (userRole === 'admin');
+  const canDeleteInvoiceConfig = (userRole === 'super_admin') || (userRole === 'admin');
   const editPermissionDeniedMessage = "You do not have permission to edit Invoice Field Configuration.";
   const deletePermissionDeniedMessage = "You do not have permission to delete Invoice Field Configuration.";
 

@@ -323,12 +323,27 @@ const VendorFinalQueue = () => {
 
         const offset = (page - 1) * pageSize;
 
-        // ── Step 1: fetch INACTIVE instance_ids ──────────────────────────────
-        let instanceFilterUrl = `/api/v1/tables/ap_process_workflow_instances?select=instance_id&is_active=eq.false`;
-        if (user.role !== 'super_admin' && user.tenantId) {
-            instanceFilterUrl += `&tenant_id=eq.${user.tenantId}`;
-        }
+        // ── TWO-STEP: resolve inactive instance_ids, then filter churn policies ──
+        // We join the workflow instances table and filter where is_active = false.
+        // All other filtering (status/stage) is removed in favour of this single flag.
+        // TWO-STEP FILTER: resolve inactive instance_ids first, then filter churn policies.
+        // PostgREST join filters on ap_process_workflow_instances do not correctly
+        // restrict ap_vendors rows because ap_vendors is the FK-owning side.
+        // The join returns ALL instances for the tenant, not just the matched one,
+        // so the embedded filter cannot exclude vendors by a specific instance's is_active.
+        // Correct fix: step 1 = get instance_ids where is_active=false,
+        //              step 2 = filter churn policies with instance_id=in.(...)
 
+        // --- Step 1: fetch instance_ids where pending_with != login user's role ---
+        // VendorFinalQueue shows records that are NOT pending with the login user's role.
+        // No tenant_id filtering here — role-specific scoping is done on churn_policy in Step 2.
+        let instanceFilterUrl = `/api/v1/tables/ap_process_workflow_instances?select=instance_id`;
+
+        // All roles (sla, spoc, admin, super_admin): exclude records pending with the login user's role
+        if (user.role) {
+            instanceFilterUrl += `&pending_with=neq.${user.role}`;
+        }
+        
         let inactiveInstanceIds = [];
         try {
             const instanceRes = await axios.get(instanceFilterUrl, {
@@ -345,6 +360,7 @@ const VendorFinalQueue = () => {
             return;
         }
 
+        // Short-circuit if no inactive instances
         if (inactiveInstanceIds.length === 0) {
             setPolicies([]);
             setTotalCount(0);
@@ -354,13 +370,16 @@ const VendorFinalQueue = () => {
             return;
         }
 
-        // ── Step 2: query churn_policy filtered by inactive instance_ids ─────
+        // --- Step 2: query churn_policy filtered by inactive instance_ids ---
         let policiesUrl = `/api/v1/tables/churn_policy?select=*,ap_users(user_name),ap_tenants(tenant_name)`;
 
+        // --- 1. Base Filter: policies whose instance_id is in the inactive set ---
         policiesUrl += `&instance_id=in.(${inactiveInstanceIds.join(',')})`;
+
+        // --- 2. Pagination ---
         policiesUrl += `&limit=${pageSize}&offset=${offset}`;
 
-        // Sorting
+        // --- 3. Sorting ---
         const effectiveSortField = sortField || 'churn_policy_id';
         const effectiveSortAsc = sortAsc;
 
@@ -379,41 +398,59 @@ const VendorFinalQueue = () => {
         else if (effectiveSortField === 'tenantName') dbSortFieldMapped = 'ap_tenants.tenant_name';
 
         let orderQuery = `${dbSortFieldMapped}.${effectiveSortAsc ? 'asc' : 'desc'}.nullslast`;
-        if (effectiveSortField !== 'id') {
+
+        // Add secondary sort by churn_policy_id to break ties, but avoid duplicates
+        if (effectiveSortField === 'created_at') {
+            orderQuery += `,churn_policy_id.desc`;
+        } else if (effectiveSortField !== 'id' && dbSortFieldMapped !== 'churn_policy_id') {
             orderQuery += `,churn_policy_id.desc`;
         }
+
         policiesUrl += `&order=${orderQuery}`;
 
-        // Role-based filters
-        if (user.role === 'account_user') {
-            if (!user.user_id || !user.tenantId) {
+        // --- 4. Role-based Filters on churn_policy ---
+        // sla        : old_channel == user.tenantName  AND  fls_email_excel == user.email
+        // spoc       : old_channel == user.tenantName
+        // admin      : pending_with=neq.admin already applied at instance level — no extra policy filter
+        // super_admin: no additional filters
+        if (user.role === 'sla') {
+            if (!user.tenantName || !user.email) {
                 setLoading(false);
                 setUpdatingResults(false);
                 setInitialLoad(false);
+                setPolicies([]);
+                setTotalCount(0);
                 return;
             }
-            policiesUrl += `&created_by=eq.${user.user_id}&tenant_id=eq.${user.tenantId}`;
-        } else if (user.role === 'account_manager' || user.role === 'tenant_admin') {
-            if (!user.tenantId) {
+            policiesUrl += `&old_channel=eq.${encodeURIComponent(user.tenantName)}`;
+            policiesUrl += `&fls_email_excel=eq.${encodeURIComponent(user.email)}`;
+        } else if (user.role === 'spoc') {
+            if (!user.tenantName) {
                 setLoading(false);
                 setUpdatingResults(false);
                 setInitialLoad(false);
+                setPolicies([]);
+                setTotalCount(0);
                 return;
             }
-            policiesUrl += `&tenant_id=eq.${user.tenantId}`;
+            policiesUrl += `&old_channel=eq.${encodeURIComponent(user.tenantName)}`;
         }
+        // admin: no extra policy-level filter (pending_with scoping is sufficient)
+        // super_admin: no additional filters
 
-        // Column filters
+        // --- 5. Column Filters ---
         Object.entries(debouncedColumnFilters).forEach(([key, value]) => {
             if (value) {
                 const filterValue = encodeURIComponent(value);
                 switch (key) {
                     case 'id':
-                        if (!isNaN(value)) {
+                        if (value && !isNaN(value)) {
                             policiesUrl += `&churn_policy_id=eq.${value}`;
-                        } else {
+                        } else if (value) {
                             const numericPart = value.replace(/\D/g, '');
-                            if (numericPart) policiesUrl += `&churn_policy_id=eq.${numericPart}`;
+                            if (numericPart) {
+                                policiesUrl += `&churn_policy_id=eq.${numericPart}`;
+                            }
                         }
                         break;
                     case 'new_policy_number':
@@ -445,15 +482,23 @@ const VendorFinalQueue = () => {
                             const startOfDay = new Date(value);
                             const endOfDay = new Date(value);
                             endOfDay.setDate(endOfDay.getDate() + 1);
-                            policiesUrl += `&created_at=gte.${encodeURIComponent(startOfDay.toISOString())}&created_at=lt.${encodeURIComponent(endOfDay.toISOString())}`;
-                        } catch (e) { }
+
+                            const startISO = startOfDay.toISOString();
+                            const endISO = endOfDay.toISOString();
+
+                            policiesUrl += `&created_at=gte.${encodeURIComponent(startISO)}&created_at=lt.${encodeURIComponent(endISO)}`;
+                        } catch (e) {
+                            // Invalid date for created_at filtering
+                        }
                         break;
                     case 'updated_at':
                         try {
                             const startOfDay = new Date(value);
                             const endOfDay = new Date(value);
                             endOfDay.setDate(endOfDay.getDate() + 1);
-                            policiesUrl += `&updated_at=gte.${encodeURIComponent(startOfDay.toISOString())}&updated_at=lt.${encodeURIComponent(endOfDay.toISOString())}`;
+                            const startISO = startOfDay.toISOString();
+                            const endISO = endOfDay.toISOString();
+                            policiesUrl += `&updated_at=gte.${encodeURIComponent(startISO)}&updated_at=lt.${encodeURIComponent(endISO)}`;
                         } catch (e) { }
                         break;
                     case 'userName':
@@ -474,7 +519,7 @@ const VendorFinalQueue = () => {
             }
         });
 
-        // Advanced filters + default date range
+        // --- 6. Advanced Filters + Date Range ---
         if (Object.values(appliedFilters).some(v => v)) {
             if (appliedFilters.from_date && isValidDateFormat(appliedFilters.from_date)) {
                 policiesUrl += `&created_at=gte.${appliedFilters.from_date}T00:00:00.000Z`;
@@ -493,16 +538,16 @@ const VendorFinalQueue = () => {
         const config = {
             headers: {
                 Authorization: `Bearer ${token}`,
-                'Prefer': 'count=exact'
+                'Prefer': 'count=exact' // Request total count
             }
         };
 
         try {
-            const res = await axios.get(policiesUrl, config);
-            const data = res.data;
+            const policiesResponse = await axios.get(policiesUrl, config);
+            const policiesData = policiesResponse.data;
 
             // Get total count from Content-Range header
-            const contentRange = res.headers['content-range'];
+            const contentRange = policiesResponse.headers['content-range'];
             let total = 0;
             if (contentRange) {
                 const match = contentRange.match(/\/(\d+)/);
@@ -512,43 +557,60 @@ const VendorFinalQueue = () => {
             }
             setTotalCount(total);
 
-            // Map churn_policy data to display-friendly shape
-            let formatted = data.map((policy) => ({
-                id: policy.churn_policy_id,
-                new_policy_number: policy.new_policy_number || '—',
-                old_policy_number: policy.old_policy_number || '—',
-                fls_name: policy.fls_name || '—',
-                fls_code: policy.fls_code || '—',
-                channel_hod_name: policy.channel_hod_name || '—',
-                old_channel: policy.old_channel || '—',
-                attachment_type: policy.attachment_type || '—',
-                policy_status: policy.policy_status || 'unknown',
-                action_comments: policy.action_comments || '',
-                exception_reason: policy.exception_reason || '',
-                created_at: policy.created_at || '',
-                updated_at: policy.updated_at || '',
-                instance_id: policy.instance_id,
-                userName: policy.ap_users ? policy.ap_users.user_name : '',
-                tenantName: policy.ap_tenants ? policy.ap_tenants.tenant_name : '',
-            }));
+            // Step 2: Map policy data directly (no separate document lookup needed)
+            // Format data
+            let formatted = policiesData.map((policy) => {
+                const newPolicyNumber = policy.new_policy_number || '—';
+                const oldPolicyNumber = policy.old_policy_number || '—';
+                const flsName = policy.fls_name || 'Unknown';
+                const flsCode = policy.fls_code || '—';
+                const channelHodName = policy.channel_hod_name || '';
+                const attachmentType = policy.attachment_type || '—';
+                const createdAt = policy.created_at || '';
+                const userName = policy.ap_users ? policy.ap_users.user_name : '';
+                const tenantName = policy.ap_tenants ? policy.ap_tenants.tenant_name : '';
 
-            // Client-side safety filters for join-based fields
+                return {
+                    id: policy.churn_policy_id,
+                    new_policy_number: newPolicyNumber,
+                    old_policy_number: oldPolicyNumber,
+                    fls_name: flsName,
+                    fls_code: flsCode,
+                    channel_hod_name: channelHodName,
+                    old_channel: policy.old_channel || '—',
+                    attachment_type: attachmentType,
+                    policy_status: policy.policy_status || 'unknown',
+                    action_comments: policy.action_comments || '',
+                    exception_reason: policy.exception_reason || '',
+                    created_at: createdAt,
+                    updated_at: policy.updated_at || '',
+                    instance_id: policy.instance_id,
+                    userName,
+                    tenantName,
+                };
+            });
+
+            // Additional client-side filtering for userName, tenantName as a safety measure
             if (columnFilters.userName && columnFilters.userName.trim()) {
                 formatted = formatted.filter(item =>
-                    item.userName && item.userName.toLowerCase().includes(columnFilters.userName.toLowerCase())
+                    item.userName && item.userName.trim() &&
+                    item.userName.toLowerCase().includes(columnFilters.userName.toLowerCase())
                 );
             }
+
             if (columnFilters.tenantName && columnFilters.tenantName.trim()) {
                 formatted = formatted.filter(item =>
-                    item.tenantName && item.tenantName.toLowerCase().includes(columnFilters.tenantName.toLowerCase())
+                    item.tenantName && item.tenantName.trim() &&
+                    item.tenantName.toLowerCase().includes(columnFilters.tenantName.toLowerCase())
                 );
             }
 
             setPolicies(formatted);
+
         } catch (err) {
-            toast.error('Failed to fetch churn policies.');
             setTotalCount(0);
             setPolicies([]);
+            console.error('Error fetching churn policies:', err);
         } finally {
             setLoading(false);
             setUpdatingResults(false);
@@ -570,13 +632,16 @@ const VendorFinalQueue = () => {
         try {
             const config = { headers: { Authorization: `Bearer ${token}` } };
             let roleFilter = '';
-            if (user.role === 'account_user') {
-                if (!user.user_id || !user.tenantId) return;
-                roleFilter = `&created_by=eq.${user.user_id}&tenant_id=eq.${user.tenantId}`;
-            } else if (user.role === 'account_manager' || user.role === 'tenant_admin') {
-                if (!user.tenantId) return;
-                roleFilter = `&tenant_id=eq.${user.tenantId}`;
+            if (user.role === 'sla') {
+                // sla: filter by old_channel == tenantName AND fls_email_excel == email
+                if (!user.tenantName || !user.email) return;
+                roleFilter = `&old_channel=eq.${encodeURIComponent(user.tenantName)}&fls_email_excel=eq.${encodeURIComponent(user.email)}`;
+            } else if (user.role === 'spoc') {
+                // spoc: filter by old_channel == tenantName only
+                if (!user.tenantName) return;
+                roleFilter = `&old_channel=eq.${encodeURIComponent(user.tenantName)}`;
             }
+            // admin / super_admin: no extra filter
 
             const [statusRes, flsRes] = await Promise.all([
                 axios.get(`/api/v1/tables/churn_policy?select=policy_status${roleFilter}`, config),
@@ -760,7 +825,7 @@ const VendorFinalQueue = () => {
 
     // ─── TABLE COLUMNS ────────────────────────────────────────────────────────
     const columns = useMemo(() => {
-        const isManagerOrAdmin = user?.role === 'account_manager' || user?.role === 'tenant_admin';
+        const isManagerOrAdmin = user?.role === 'spoc' || user?.role === 'admin';
         const isSuperAdmin = user?.role === 'super_admin';
 
         let baseColumns = [];
@@ -944,7 +1009,7 @@ const VendorFinalQueue = () => {
     }
 
     if (!workflowLoading && workflowConfigMissing && user?.role !== 'super_admin') {
-        return <WorkflowMissingWarning pageName="Final Churn Policies" />;
+        return <WorkflowMissingWarning pageName="Final Queue" />;
     }
 
     // ─── MAIN RENDER ─────────────────────────────────────────────────────────
@@ -958,7 +1023,7 @@ const VendorFinalQueue = () => {
                 {/* Title + inline date badge */}
                 <div className="flex items-center gap-2 min-w-0">
                     <span className="flex-shrink-0 text-sm font-medium text-gray-800">
-                        Final Churn Policies ({totalCount} items)
+                        Final Queue ({totalCount} items)
                     </span>
 
                     {isDefaultDateRange && (

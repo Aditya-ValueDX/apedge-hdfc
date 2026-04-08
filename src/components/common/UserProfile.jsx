@@ -2,6 +2,7 @@ import React, { useEffect, useState } from 'react';
 import { createPortal } from 'react-dom';
 import axios from '../../utils/authInterceptor';
 import { User as UserIcon, Mail, Briefcase, Phone, Building, X } from 'lucide-react'; // Added X for the close button
+import { useSelector } from 'react-redux';
 
 // --- Helper Components for Professional Styling ---
 
@@ -29,18 +30,21 @@ const ProfessionalDetailRow = ({ icon: Icon, label, value }) => (
 // --- Main Professional Component ---
 
 const UserProfile = ({ user, token, onClose }) => {
-    const [loading, setLoading] = useState(true);
+    const [loading, setLoading] = useState(false);
     const [profile, setProfile] = useState({});
-    const [tenantName, setTenantName] = useState('Loading...');
+    
+    // Get tenant name from Redux store
+    const authState = useSelector(state => state.auth);
+    const reduxTenantName = authState.user?.tenantName || user.tenantName || (user.role === 'super_admin' ? 'Super Admin Mode' : 'Not Available');
 
     useEffect(() => {
         let mounted = true;
 
         const fetchData = async () => {
             try {
-                // Fetch user info and related tenant in one PostgREST relational select
+                // Fetch user info
                 const userResp = await axios.get(
-                    `/api/v1/tables/ap_users?id=eq.${user.user_id}&select=*,ap_tenants(tenant_id,tenant_name)`,
+                    `/api/v1/tables/ap_users?id=eq.${user.user_id}&select=*`,
                     { headers: { Authorization: `Bearer ${token}` } }
                 );
 
@@ -49,23 +53,9 @@ const UserProfile = ({ user, token, onClose }) => {
                 const u = (userResp.data && userResp.data[0]) || {};
                 setProfile(u);
 
-                // Tenant name comes from the relational select: response.data[0].ap_tenants.tenant_name
-                const tenantRel = u.ap_tenants;
-                const resolvedTenantName = (
-                    (tenantRel && tenantRel.tenant_name) ||
-                    (Array.isArray(tenantRel) && tenantRel[0] && tenantRel[0].tenant_name)
-                );
-
-                if (resolvedTenantName) {
-                    setTenantName(resolvedTenantName);
-                } else {
-                    setTenantName(user.role === 'super_admin' ? 'Super Admin Mode' : 'Not Available');
-                }
-
             } catch (err) {
                 // fallback to basic values
                 setProfile({ user_name: user.name || '', email: user.email || '', user_role: user.role || '' });
-                setTenantName(user.role === 'super_admin' ? 'Super Admin Mode' : 'Not Available');
             } finally {
                 if (mounted) setLoading(false);
             }
@@ -142,11 +132,11 @@ const UserProfile = ({ user, token, onClose }) => {
                             </>
                         ) : (
                             <>
-                                <ProfessionalDetailRow 
+                                {/* <ProfessionalDetailRow 
                                     icon={UserIcon} 
-                                    label="Username" 
+                                    label="Name" 
                                     value={profile.user_name || user.name} 
-                                />
+                                /> */}
                                 <ProfessionalDetailRow 
                                     icon={Mail} 
                                     label="Email" 
@@ -164,8 +154,8 @@ const UserProfile = ({ user, token, onClose }) => {
                                 />
                                 <ProfessionalDetailRow 
                                     icon={Building} 
-                                    label="Tenant" 
-                                    value={tenantName} 
+                                    label="Channel" 
+                                    value={reduxTenantName} 
                                 />
                             </>
                         )}
