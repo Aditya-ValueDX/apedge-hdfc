@@ -25,7 +25,7 @@ import { loadSecure } from "./utils/secureStorage"; // adjust path if needed
  * on an invoice, which would be enforced within the component logic.
  */
 export const PERMISSIONS = {
-    account_user: { // Mapped from "Account User"
+    sla: { // Mapped from "SLA"
         canView: [
             '/dashboard',
             '/vendor/dashboard',
@@ -53,7 +53,7 @@ export const PERMISSIONS = {
         ],
         canDelete: [],
     },
-    account_manager: { // Mapped from "Account account_manager"
+    spoc: { // Mapped from "SPOC"
         canView: [
             '/dashboard',
             '/vendor/dashboard',
@@ -72,19 +72,21 @@ export const PERMISSIONS = {
             '/invoice_reports', // Reports
             '/vendor_reports', // Vendor Reports
             '/billing', // Billing
+            '/users', // User Management
         ],
         canEdit: [
             'invoice_approve_reject', // Invoice View: approve/reject
             'vendor_approve_reject', // Vendor View: approve/reject
             'recon_approve_reject',   // Recon: approve/reject
             'upload_document',        // Permission to upload documents
+            'all_users',
         ],
         canDelete: [
             'invoice_list_delete', // Invoice List: Delete
             'vendor_list_delete', // Vendor List: Delete
         ],
     },
-    tenant_admin: { // Mapped from "tenant_admin Admin"
+    admin: { // Mapped from "Admin"
         canView: [
             '/dashboard',
             '/vendor/dashboard',
@@ -157,7 +159,7 @@ export const PERMISSIONS = {
             '/invoice_reports', // Reports
             '/vendor_reports', // Vendor Reports
             '/billing', // Billing
-            '/tenantreg', // tenant_admin Registration
+            '/tenantreg', // admin Registration
             '/users', // User Management
             '/configure', // Invoice Field Config
             '/vendor_configure', // Vendor Invoice Field Config
@@ -181,6 +183,7 @@ export const PERMISSIONS = {
             'parameters',             // Parameters: Edit
             'tenant_registration',    // Tenant Registration: Edit
             'default_config',         // Default Configuration: Edit
+            'all_users',
         ],
         canDelete: [
             'all_invoices',           // Implies delete on any invoice data
@@ -207,7 +210,7 @@ export const PERMISSIONS = {
  * Helper function to check if a user has permission to view a specific path.
  * This can be used in routing or component rendering logic.
  *
- * @param {string} role - The role of the current user (e.g., 'super_admin', 'tenant_admin', 'account_user').
+ * @param {string} role - The role of the current user (e.g., 'super_admin', 'admin', 'SLA').
  * @param {string} path - The path or feature identifier to check permission for.
  * @returns {boolean} - True if the role has view permission, false otherwise.
  */

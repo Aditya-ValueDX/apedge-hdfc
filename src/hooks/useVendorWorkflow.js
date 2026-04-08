@@ -30,7 +30,7 @@ const useVendorWorkflow = () => {
             try {
                 setLoading(true);
                 const selectFields = 'unique_key,module_key,req_value,metadata';
-                const filterParams = `tenant_id=eq.${tenantId}&select=${selectFields}&module_key=ilike.%Vendor%`;
+                const filterParams = `select=${selectFields}&module_key=ilike.%Vendor%`;
 
                 const response = await axios.get(
                     `/api/v1/tables/ap_parameters?${filterParams}`,
@@ -40,7 +40,7 @@ const useVendorWorkflow = () => {
                 );
 
                 if (!isMounted) return;
-                console.log('Response Data:', response.data);
+                // console.log('Response Data:', response.data);
 
                 const vendorWorkflowParam = response.data.find(
                     (param) => param.unique_key === 'vendor_workflow_json'
@@ -49,7 +49,7 @@ const useVendorWorkflow = () => {
                 if (vendorWorkflowParam?.metadata) {
                     try {
                         const parsed = JSON.parse(vendorWorkflowParam.metadata);
-                        console.log('Parsed Workflow Config:', parsed);
+                        // console.log('Parsed Workflow Config:', parsed);
                         setWorkflowConfig(parsed);
                         setWorkflowConfigMissing(false);
                     } catch (parseError) {
@@ -78,7 +78,7 @@ const useVendorWorkflow = () => {
         };
     }, [token, tenantId]);
 
-    console.log('Workflow Config:', workflowConfig);
+    // console.log('Workflow Config:', workflowConfig);
 
     return { workflowConfig, workflowConfigMissing, loading, error };
 };

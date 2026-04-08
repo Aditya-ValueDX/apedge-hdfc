@@ -9,8 +9,17 @@ import {
     Lock,
     Eye,
     Loader2,
-    RefreshCw
+    RefreshCw,
+    CheckSquare,
+    Square,
+    CheckCheck,
+    ThumbsUp,
+    ThumbsDown,
+    RotateCcw,
+    ChevronUp,
+    AlertTriangle,
 } from 'lucide-react';
+import { getCurrentTimeISOString } from '../../utils/timezoneUtils';
 import { useSelector } from 'react-redux';
 import TableComponent from '../common/TableComponent';
 import StageDisplay from '../common/StageDisplay';
@@ -156,6 +165,16 @@ const VendorQueue = () => {
     const [invoiceToDelete, setInvoiceToDelete] = useState(null);
 
     const { workflowConfig, workflowConfigMissing, loading: workflowLoading } = useVendorWorkflow();
+
+    // ── BULK ACTION STATE (admin-only) ──────────────────────────────────────────
+    const [selectedIds, setSelectedIds] = useState(new Set());
+    const [bulkActionType, setBulkActionType] = useState(null); // 'approve' | 'reject' | 'revert'
+    const [showBulkConfirmModal, setShowBulkConfirmModal] = useState(false);
+    const [bulkComment, setBulkComment] = useState('');
+    const [bulkCommentError, setBulkCommentError] = useState('');
+    const [bulkProcessing, setBulkProcessing] = useState(false);
+    const [bulkResult, setBulkResult] = useState(null); // { success: n, failed: n }
+    // ───────────────────────────────────────────────────────────────────────────
 
     // New states for partial loading
     const [updatingResults, setUpdatingResults] = useState(false); // New state for updating results indicator
@@ -375,13 +394,16 @@ const VendorQueue = () => {
         try {
             const config = { headers: { Authorization: `Bearer ${token}` } };
             let roleFilter = '';
-            if (user.role === 'account_user') {
-                if (!user.user_id || !user.tenantId) return;
-                roleFilter = `&created_by=eq.${user.user_id}&tenant_id=eq.${user.tenantId}`;
-            } else if (user.role === 'account_manager' || user.role === 'tenant_admin') {
-                if (!user.tenantId) return;
-                roleFilter = `&tenant_id=eq.${user.tenantId}`;
+            if (user.role === 'sla') {
+                // sla: filter by old_channel == tenantName AND fls_email_excel == email
+                if (!user.tenantName || !user.email) return;
+                roleFilter = `&old_channel=eq.${encodeURIComponent(user.tenantName)}&fls_email_excel=eq.${encodeURIComponent(user.email)}`;
+            } else if (user.role === 'spoc') {
+                // spoc: filter by old_channel == tenantName only
+                if (!user.tenantName) return;
+                roleFilter = `&old_channel=eq.${encodeURIComponent(user.tenantName)}`;
             }
+            // admin / super_admin: no extra filter
 
             const [statusRes, policyRes] = await Promise.all([
                 axios.get(`/api/v1/tables/churn_policy?select=policy_status${roleFilter}`, config),
@@ -444,14 +466,17 @@ const VendorQueue = () => {
             // Correct fix: step 1 = get instance_ids where is_active=true,
             //              step 2 = filter ap_vendors with instance_id=in.(...)
 
-            // --- Step 1: fetch active instance_ids (tenant-scoped) ---
+            // --- Step 1: fetch active instance_ids ---
+            // VendorQueue shows records where is_active=true AND pending_with == login user's role.
+            // No tenant_id filtering here — role-specific scoping is done on churn_policy in Step 2.
             let instanceFilterUrl = `/api/v1/tables/ap_process_workflow_instances?select=instance_id&is_active=eq.true`;
-            // Super admin sees all tenants — skip tenant filter so all instances are returned
-            if (user.role !== 'super_admin' && user.tenantId) {
-                instanceFilterUrl += `&tenant_id=eq.${user.tenantId}`;
+
+            // All roles (sla, spoc, admin, super_admin): filter by pending_with == user's role
+            if (user.role) {
+                instanceFilterUrl += `&pending_with=eq.${user.role}`;
             }
-            // NEW: if a step filter was passed from VendorDashboard, narrow to that step.
-            // Dynamic — works for any current_step value, never hardcoded.
+
+            // Step filter from VendorDashboard (if navigated from there)
             if (stepFilter) {
                 instanceFilterUrl += `&current_step=eq.${encodeURIComponent(stepFilter)}`;
             }
@@ -516,21 +541,35 @@ const VendorQueue = () => {
 
             policiesUrl += `&order=${orderQuery}`;
 
-            // --- 4. Role-based Filters ---
-            if (user.role === 'account_user') {
-                if (!user.user_id || !user.tenantId) {
+            // --- 4. Role-based Filters on churn_policy ---
+            // sla        : old_channel == user.tenantName  AND  fls_email_excel == user.email
+            // spoc       : old_channel == user.tenantName
+            // admin      : pending_with=eq.admin already applied at instance level — no extra policy filter
+            // super_admin: no additional filters
+            if (user.role === 'sla') {
+                if (!user.tenantName || !user.email) {
                     setLoading(false);
+                    setUpdatingResults(false);
+                    setInitialLoad(false);
+                    setFiles([]);
+                    setTotalCount(0);
                     return;
                 }
-                policiesUrl += `&created_by=eq.${user.user_id}&tenant_id=eq.${user.tenantId}`;
-            } else if (user.role === 'account_manager' || user.role === 'tenant_admin') {
-                if (!user.tenantId) {
+                policiesUrl += `&old_channel=eq.${encodeURIComponent(user.tenantName)}`;
+                policiesUrl += `&fls_email_excel=eq.${encodeURIComponent(user.email)}`;
+            } else if (user.role === 'spoc') {
+                if (!user.tenantName) {
                     setLoading(false);
+                    setUpdatingResults(false);
+                    setInitialLoad(false);
+                    setFiles([]);
+                    setTotalCount(0);
                     return;
                 }
-                policiesUrl += `&tenant_id=eq.${user.tenantId}`;
+                policiesUrl += `&old_channel=eq.${encodeURIComponent(user.tenantName)}`;
             }
-            // Super admin needs no additional filters
+            // admin: no extra policy-level filter (pending_with scoping is sufficient)
+            // super_admin: no additional filters
 
             // --- 5. Column Filters ---
             Object.entries(debouncedColumnFilters).forEach(([key, value]) => {
@@ -653,25 +692,49 @@ const VendorQueue = () => {
                 setTotalCount(total);
 
 
-                // Fetch full dataset counts for color legend
-                // Count URL: reuse the same activeInstanceIds fetched above
-                let countUrl = `/api/v1/tables/churn_policy?select=*,ap_users(user_name),ap_tenants(tenant_name),error_desc`;
-                countUrl += `&instance_id=in.(${activeInstanceIds.join(',')})`;
+                // Fetch full dataset counts for color legend (same scoping as main query)
+                let countInstanceFilterUrl = `/api/v1/tables/ap_process_workflow_instances?select=instance_id&is_active=eq.true`;
 
-                // Add role-based filters for count request
-                if (user.role === 'account_user') {
-                    if (!user.user_id || !user.tenantId) {
-                        setDuplicateBillCount(0);
+                // All roles: filter by pending_with == user's role
+                if (user.role) {
+                    countInstanceFilterUrl += `&pending_with=eq.${user.role}`;
+                }
+
+                // Step filter if active
+                if (stepFilter) {
+                    countInstanceFilterUrl += `&current_step=eq.${encodeURIComponent(stepFilter)}`;
+                }
+                
+                let activeCountInstanceIds = [];
+                try {
+                    const countInstanceRes = await axios.get(countInstanceFilterUrl, {
+                        headers: { Authorization: `Bearer ${token}` }
+                    });
+                    activeCountInstanceIds = countInstanceRes.data.map(r => r.instance_id).filter(Boolean);
+                } catch (countInstanceErr) {
+                    console.error('Failed to fetch active instance IDs for count:', countInstanceErr);
+                    activeCountInstanceIds = [];
+                }
+                
+                let countUrl = `/api/v1/tables/churn_policy?select=*,ap_users(user_name),ap_tenants(tenant_name)`;
+                countUrl += `&instance_id=in.(${activeCountInstanceIds.join(',')})`;
+
+                // Role-based filters for count (mirrors main query)
+                if (user.role === 'sla') {
+                    if (user.tenantName && user.email) {
+                        countUrl += `&old_channel=eq.${encodeURIComponent(user.tenantName)}`;
+                        countUrl += `&fls_email_excel=eq.${encodeURIComponent(user.email)}`;
                     } else {
-                        countUrl += `&created_by=eq.${user.user_id}&tenant_id=eq.${user.tenantId}`;
+                        setDuplicateBillCount(0);
                     }
-                } else if (user.role === 'account_manager' || user.role === 'tenant_admin') {
-                    if (!user.tenantId) {
-                        setDuplicateBillCount(0);
+                } else if (user.role === 'spoc') {
+                    if (user.tenantName) {
+                        countUrl += `&old_channel=eq.${encodeURIComponent(user.tenantName)}`;
                     } else {
-                        countUrl += `&tenant_id=eq.${user.tenantId}`;
+                        setDuplicateBillCount(0);
                     }
                 }
+                // admin / super_admin: no extra policy-level filter
 
                 // Add the same column filters for the count URL
                 Object.entries(debouncedColumnFilters).forEach(([key, value]) => {
@@ -780,6 +843,7 @@ const VendorQueue = () => {
                     setDuplicateBillCount(duplicateCount);
                 } catch (countErr) {
                     setDuplicateBillCount(0);
+                    console.error('Error fetching count for duplicate bills:', countErr);
                 }
 
                 // Step 2: Map policy data directly (no separate document lookup needed)
@@ -809,6 +873,12 @@ const VendorQueue = () => {
                         stage: policy.policy_status || 'New',
                         userName,
                         tenantName,
+                        // New policy-specific fields
+                        old_policy_number: policy.old_policy_number || '—',
+                        new_policy_number: policy.new_policy_number || '—',
+                        new_policy_rcd: policy.new_policy_rcd || '—',
+                        fls_name: policy.fls_name || '—',
+                        fls_code: policy.fls_code || '—',
                         error_desc: policy.exception_reason ? (() => {
                             try {
                                 return typeof policy.exception_reason === 'string'
@@ -863,6 +933,216 @@ const VendorQueue = () => {
         appliedFilters, debouncedColumnFilters, isDefaultDateRange, refetchTrigger,
         stepFilter  // NEW: re-fetch when step filter changes
     ]);
+
+    // ── BULK SELECTION HELPERS ──────────────────────────────────────────────────
+    const isAdmin = userRole === 'admin' || userRole === 'super_admin';
+
+    const toggleSelectId = useCallback((id) => {
+        setSelectedIds(prev => {
+            const next = new Set(prev);
+            if (next.has(id)) next.delete(id); else next.add(id);
+            return next;
+        });
+    }, []);
+
+    const selectAllOnPage = useCallback(() => {
+        setSelectedIds(prev => {
+            const next = new Set(prev);
+            files.forEach(f => next.add(f.id));
+            return next;
+        });
+    }, [files]);
+
+    const clearAllSelections = useCallback(() => {
+        setSelectedIds(prev => {
+            const next = new Set(prev);
+            files.forEach(f => next.delete(f.id));
+            return next;
+        });
+    }, [files]);
+
+    const isAllPageSelected = files.length > 0 && files.every(f => selectedIds.has(f.id));
+    const isSomePageSelected = files.some(f => selectedIds.has(f.id)) && !isAllPageSelected;
+
+    // ── BULK WORKFLOW HELPERS (mirror VendorEditor logic) ──────────────────────
+    const resolveWorkflowStepBulk = useCallback((actionRef, currentStepId) => {
+        if (!workflowConfig) return { current_step: currentStepId, next_step: null, status: null, pending_with: null };
+        const steps = workflowConfig.steps || [];
+        if (!steps.length) return { current_step: currentStepId, next_step: null, status: null, pending_with: null };
+        const csi = steps.findIndex(s => s.stepId === currentStepId);
+        const cs = csi >= 0 ? steps[csi] : steps[0];
+        const matched = (cs?.transitions || []).find(t => t.actionRef?.toLowerCase() === actionRef?.toLowerCase());
+        if (matched) {
+            const du = matched.dataUpdates || {};
+            const txNext = du.next_step || du.NextStep || null;
+            const rc = txNext || steps[csi + 1]?.stepId || cs.stepId;
+            const rco = steps.find(s => s.stepId === rc);
+            const rci = rco ? steps.indexOf(rco) : -1;
+            const rn = rci >= 0 ? steps[rci + 1]?.stepId ?? null : null;
+            return { current_step: rc, next_step: rn, status: du.status || null, pending_with: du.pending_with || null };
+        }
+        return { current_step: currentStepId || steps[0]?.stepId || null, next_step: steps[csi + 1]?.stepId || null, status: cs?.dataUpdates?.status || null, pending_with: cs?.dataUpdates?.pending_with || null };
+    }, [workflowConfig]);
+
+    // Process a single policy item in bulk
+    const processSingleBulkAction = async (item, actionRef, statusLabel, comment) => {
+        const authHeaders = { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` };
+        const nowIso = getCurrentTimeISOString();
+
+        // 1. Get current workflow step
+        let csid = workflowConfig?.steps?.[0]?.stepId || null;
+        if (item.id) {
+            try {
+                // item has instance_id embedded (we need to fetch it)
+                const policyRes = await axios.get(
+                    `/api/v1/tables/churn_policy?churn_policy_id=eq.${item.id}&select=instance_id`,
+                    { headers: { Authorization: `Bearer ${token}` } }
+                );
+                const instId = policyRes.data?.[0]?.instance_id;
+                if (instId) {
+                    const instRes = await axios.get(
+                        `/api/v1/tables/ap_process_workflow_instances?instance_id=eq.${instId}`,
+                        { headers: { Authorization: `Bearer ${token}` } }
+                    );
+                    if (instRes.data?.[0]?.current_step) csid = instRes.data[0].current_step;
+                    const instanceId = instId;
+
+                    // 2. Resolve next step
+                    const { current_step, next_step, status: wfStatus, pending_with } = resolveWorkflowStepBulk(actionRef, csid);
+                    const effectiveStatus = wfStatus || statusLabel;
+                    const steps = workflowConfig?.steps || [];
+                    const isTerminal = current_step && !steps.find(s => s.stepId === current_step);
+
+                    // 3. Update workflow instance
+                    await axios.patch(
+                        `/api/v1/tables/ap_process_workflow_instances?instance_id=eq.${instanceId}`,
+                        {
+                            current_step: current_step || null,
+                            next_step: next_step || null,
+                            status: effectiveStatus || null,
+                            pending_with: pending_with || null,
+                            updated_by: user.user_id,
+                            updated_at: nowIso,
+                            ...(isTerminal && { is_active: false }),
+                        },
+                        { headers: authHeaders }
+                    );
+
+                    // 4. Post workflow history
+                    await axios.post(
+                        '/api/v1/tables/ap_process_workflow_history',
+                        [{
+                            tenant_id: user.tenantId,
+                            instance_id: instanceId,
+                            module_name: 'Churn Policy',
+                            Process_name: 'Churn Policy Onboarding',
+                            created_by: user.user_id,
+                            created_role_name: user.role || '',
+                            previous_step: csid || null,
+                            next_step: current_step || null,
+                            actionRef,
+                            user_comments: comment || null,
+                            status: effectiveStatus || null,
+                            history_json: null,
+                        }],
+                        { headers: { ...authHeaders, Prefer: 'return=representation' } }
+                    );
+
+                    // 5. Patch churn_policy
+                    await axios.patch(
+                        `/api/v1/tables/churn_policy?churn_policy_id=eq.${item.id}`,
+                        {
+                            policy_status: effectiveStatus,
+                            action_comments: comment || null,
+                            updated_by: user.user_id,
+                            updated_at: nowIso,
+                        },
+                        { headers: authHeaders }
+                    );
+
+                    return true;
+                }
+            } catch (err) {
+                console.error(`Bulk action failed for policy ${item.id}:`, err);
+                return false;
+            }
+        }
+        return false;
+    };
+
+    // Action label → actionRef + statusLabel mapping (mirrors VendorEditor)
+    const bulkActionMeta = {
+        approve: { actionRef: 'btn_approve', statusLabel: 'Approved', requiresComment: false },
+        reject:  { actionRef: 'btn_reject',  statusLabel: 'Rejected', requiresComment: true },
+        revert:  { actionRef: 'btn_revert',  statusLabel: 'Reverted', requiresComment: true },
+    };
+
+    const handleOpenBulkModal = useCallback((actionType) => {
+        if (selectedIds.size === 0) { toast.warn('Please select at least one policy first.'); return; }
+        setBulkActionType(actionType);
+        setBulkComment('');
+        setBulkCommentError('');
+        setBulkResult(null);
+        setShowBulkConfirmModal(true);
+    }, [selectedIds]);
+
+    const handleCloseBulkModal = useCallback(() => {
+        if (bulkProcessing) return;
+        setShowBulkConfirmModal(false);
+        setBulkActionType(null);
+        setBulkComment('');
+        setBulkCommentError('');
+        setBulkResult(null);
+    }, [bulkProcessing]);
+
+    const handleConfirmBulkAction = useCallback(async () => {
+        const meta = bulkActionMeta[bulkActionType];
+        if (!meta) return;
+
+        if (meta.requiresComment && !bulkComment.trim()) {
+            setBulkCommentError(`${bulkActionType === 'reject' ? 'Rejection' : 'Revert'} reason is required.`);
+            return;
+        }
+
+        setBulkProcessing(true);
+        setBulkResult(null);
+
+        const selectedItems = files.filter(f => selectedIds.has(f.id));
+        let successCount = 0;
+        let failCount = 0;
+
+        for (const item of selectedItems) {
+            const ok = await processSingleBulkAction(item, meta.actionRef, meta.statusLabel, bulkComment.trim());
+            if (ok) successCount++; else failCount++;
+        }
+
+        setBulkResult({ success: successCount, failed: failCount });
+        setBulkProcessing(false);
+
+        if (successCount > 0) {
+            toast.success(`${successCount} policy/policies ${meta.statusLabel.toLowerCase()} successfully.`);
+            setSelectedIds(new Set());
+
+            // If ALL records on the current page were processed successfully and
+            // we are not on the first page, navigate to the previous page so the
+            // user never lands on an empty last page.
+            const remainingOnPage = files.length - successCount;
+            if (remainingOnPage <= 0 && page > 1) {
+                setPage(p => p - 1);
+            }
+
+            setRefetchTrigger(t => t + 1);
+        }
+        if (failCount > 0) {
+            toast.error(`${failCount} policy/policies failed to process.`);
+        }
+
+        if (failCount === 0) {
+            setTimeout(() => setShowBulkConfirmModal(false), 800);
+        }
+    }, [bulkActionType, bulkComment, files, selectedIds, user, token, workflowConfig, resolveWorkflowStepBulk, page]);
+
+    // ── END BULK ACTION ────────────────────────────────────────────────────────
 
     const clearAllFilters = () => {
         if (filterTimeoutRef.current) clearTimeout(filterTimeoutRef.current);
@@ -1090,10 +1370,52 @@ const VendorQueue = () => {
     ], [allStatusValues]);
 
     const columns = useMemo(() => {
-        const isManagerOrAdmin = user?.role === 'account_manager' || user?.role === 'tenant_admin';
+        const isManagerOrAdmin = user?.role === 'spoc' || user?.role === 'admin';
         const isSuperAdmin = user?.role === 'super_admin';
+        const isAdminRole = user?.role === 'admin' || user?.role === 'super_admin';
 
         let baseColumns = [];
+
+        // ── Checkbox column — admin / super_admin only ──────────────────────────
+        if (isAdminRole) {
+            baseColumns.push({
+                key: '__select__',
+                header: (
+                    <div className="flex items-center justify-center w-full">
+                        <button
+                            title={isAllPageSelected ? 'Deselect all on page' : 'Select all on page'}
+                            onClick={(e) => {
+                                e.stopPropagation();
+                                isAllPageSelected ? clearAllSelections() : selectAllOnPage();
+                            }}
+                            className="text-indigo-600 hover:text-indigo-800 transition-colors"
+                        >
+                            {isAllPageSelected
+                                ? <CheckSquare size={16} />
+                                : isSomePageSelected
+                                    ? <CheckSquare size={16} className="opacity-50" />
+                                    : <Square size={16} />}
+                        </button>
+                    </div>
+                ),
+                sortable: false,
+                filterable: false,
+                width: '44px',
+                headerAlign: 'center',
+                render: (item) => (
+                    <div className="flex items-center justify-center">
+                        <button
+                            onClick={(e) => { e.stopPropagation(); toggleSelectId(item.id); }}
+                            className={`transition-colors ${selectedIds.has(item.id) ? 'text-indigo-600' : 'text-gray-300 hover:text-indigo-400'}`}
+                            title={selectedIds.has(item.id) ? 'Deselect' : 'Select'}
+                        >
+                            {selectedIds.has(item.id) ? <CheckSquare size={15} /> : <Square size={15} />}
+                        </button>
+                    </div>
+                ),
+            });
+        }
+        // ───────────────────────────────────────────────────────────────────────
 
         // 1. Conditionally add User Name for Account Manager / Tenant Admin
         if (isManagerOrAdmin) {
@@ -1130,28 +1452,44 @@ const VendorQueue = () => {
         // The rest of the original columns
         baseColumns.push(
             {
-                key: 'vendor',
+                key: 'old_policy_number',
+                header: <>Old Policy Number</>,
+                sortable: true,
+                filterable: true,
+                width: '140px',
+                render: (item) => item.old_policy_number || '—',
+            },
+            {
+                key: 'new_policy_number',
+                header: <>New Policy Number</>,
+                sortable: true,
+                filterable: true,
+                width: '140px',
+                render: (item) => item.new_policy_number || '—',
+            },
+            {
+                key: 'new_policy_rcd',
+                header: <>New Policy RCD</>,
+                sortable: true,
+                filterable: true,
+                width: '130px',
+                render: (item) => item.new_policy_rcd || '—',
+            },
+            {
+                key: 'fls_name',
                 header: <>FLS Name</>,
                 sortable: true,
                 filterable: true,
                 width: '120px',
-                render: (item) => item.vendor || '—',
+                render: (item) => item.fls_name || '—',
             },
             {
-                key: 'vendor_code',
-                header: <>Policy Number</>,
+                key: 'fls_code',
+                header: <>FLS Code</>,
                 sortable: true,
                 filterable: true,
-                width: '120px',
-                render: (item) => item.vendor_code,
-            },
-            {
-                key: 'vendor_type',
-                header: <>Attachment Type</>,
-                sortable: true,
-                filterable: true,
-                width: '120px',
-                render: (item) => item.vendor_type || '—',
+                width: '110px',
+                render: (item) => item.fls_code || '—',
             },
             // {
             //     key: 'stage',
@@ -1298,7 +1636,7 @@ const VendorQueue = () => {
         }
 
         return baseColumns;
-    }, [getUniqueValues, navigate, user, canDeleteInvoice, handleCancelInvoice, deletePermissionDeniedMessage, allStatusValues, workflowConfig, userRole]);
+    }, [getUniqueValues, navigate, user, canDeleteInvoice, handleCancelInvoice, deletePermissionDeniedMessage, allStatusValues, workflowConfig, userRole, selectedIds, isAllPageSelected, isSomePageSelected, toggleSelectId, selectAllOnPage, clearAllSelections]);
 
     if (!canViewInvoiceList) {
         return (
@@ -1456,7 +1794,7 @@ const VendorQueue = () => {
                                     <option value="status">Status</option>
                                     <option value="comments">Comments</option>
                                     <option value="stage">Stage</option>
-                                    {user?.role === 'account_manager' || user?.role === 'tenant_admin' || user?.role === 'super_admin' ? (
+                                    {user?.role === 'spoc' || user?.role === 'admin' || user?.role === 'super_admin' ? (
                                         <>
                                             <option value="userName">User Name</option>
                                             {user?.role === 'super_admin' && <option value="tenantName">Tenant Name</option>}
@@ -1572,6 +1910,74 @@ const VendorQueue = () => {
                 </div>
             )}
 
+            {/* ── BULK ACTION TOOLBAR (admin / super_admin only) ─────────────────────
+                 Appears when one or more rows are selected. Shows count + action buttons
+                 (Approve, Reject, Revert) plus selection helpers (Select All Page,
+                 Clear All).                                                           */}
+            {isAdmin && selectedIds.size > 0 && (
+                <div className="flex flex-wrap items-center gap-2 mb-3 px-3 py-2 bg-indigo-50 border border-indigo-200 rounded-lg text-xs animate-fade-in">
+                    {/* Count badge */}
+                    <span className="flex items-center gap-1.5 font-semibold text-indigo-800">
+                        <CheckCheck size={14} className="text-indigo-600" />
+                        {selectedIds.size} {selectedIds.size === 1 ? 'policy' : 'policies'} selected
+                    </span>
+
+                    <div className="h-4 w-px bg-indigo-200 mx-1" />
+
+                    {/* Approve */}
+                    <button
+                        onClick={() => handleOpenBulkModal('approve')}
+                        className="flex items-center gap-1.5 px-3 py-1.5 bg-green-600 hover:bg-green-700 text-white rounded-md font-semibold transition-colors shadow-sm"
+                        title="Bulk Approve selected policies"
+                    >
+                        <ThumbsUp size={13} />
+                        Approve
+                    </button>
+
+                    {/* Reject */}
+                    <button
+                        onClick={() => handleOpenBulkModal('reject')}
+                        className="flex items-center gap-1.5 px-3 py-1.5 bg-red-600 hover:bg-red-700 text-white rounded-md font-semibold transition-colors shadow-sm"
+                        title="Bulk Reject selected policies"
+                    >
+                        <ThumbsDown size={13} />
+                        Reject
+                    </button>
+
+                    {/* Revert */}
+                    <button
+                        onClick={() => handleOpenBulkModal('revert')}
+                        className="flex items-center gap-1.5 px-3 py-1.5 bg-yellow-500 hover:bg-yellow-600 text-white rounded-md font-semibold transition-colors shadow-sm"
+                        title="Bulk Revert selected policies"
+                    >
+                        <RotateCcw size={13} />
+                        Revert
+                    </button>
+
+                    {/* <div className="h-4 w-px bg-indigo-200 mx-1" /> */}
+
+                    {/* Select all on current page */}
+                    {/* {!isAllPageSelected && (
+                        <button
+                            onClick={selectAllOnPage}
+                            className="flex items-center gap-1 text-indigo-700 hover:text-indigo-900 font-semibold underline-offset-2 hover:underline transition-colors"
+                        >
+                            <CheckSquare size={13} />
+                            Select all on page
+                        </button>
+                    )} */}
+
+                    {/* Clear all selections */}
+                    <button
+                        onClick={clearAllSelections}
+                        className="flex items-center gap-1 text-gray-500 hover:text-gray-800 font-semibold underline-offset-2 hover:underline transition-colors ml-auto"
+                    >
+                        <X size={13} />
+                        Clear selection
+                    </button>
+                </div>
+            )}
+
             <TableComponent
                 data={files}
                 columns={columns}
@@ -1608,6 +2014,167 @@ const VendorQueue = () => {
                 showDuplicateBill={duplicateBillCount > 0}
                 currentPage="vendorQueue"
             />
+
+            {/* ── BULK ACTION CONFIRMATION MODAL ─────────────────────────────────────
+                 Shown when admin clicks Approve / Reject / Revert in the bulk toolbar.
+                 Reject and Revert require a comment; Approve is optional.             */}
+            {showBulkConfirmModal && bulkActionType && (
+                <div className="fixed inset-0 z-[10000] bg-black/50 backdrop-blur-sm flex items-center justify-center">
+                    <div className="bg-white rounded-xl shadow-2xl border border-gray-200 w-[90%] max-w-md flex flex-col overflow-hidden">
+
+                        {/* Modal Header */}
+                        <div className={`flex items-center gap-3 px-6 py-4 border-b border-gray-100
+                            ${bulkActionType === 'approve' ? 'bg-green-50' : bulkActionType === 'reject' ? 'bg-red-50' : 'bg-yellow-50'}`}>
+                            <div className={`flex items-center justify-center h-9 w-9 rounded-full
+                                ${bulkActionType === 'approve' ? 'bg-green-100' : bulkActionType === 'reject' ? 'bg-red-100' : 'bg-yellow-100'}`}>
+                                {bulkActionType === 'approve' && <ThumbsUp size={18} className="text-green-600" />}
+                                {bulkActionType === 'reject'  && <ThumbsDown size={18} className="text-red-600" />}
+                                {bulkActionType === 'revert'  && <RotateCcw size={18} className="text-yellow-600" />}
+                            </div>
+                            <div>
+                                <h3 className="text-sm font-bold text-gray-900">
+                                    Bulk {bulkActionType.charAt(0).toUpperCase() + bulkActionType.slice(1)}
+                                </h3>
+                                <p className="text-xs text-gray-500 mt-0.5">
+                                    {selectedIds.size} {selectedIds.size === 1 ? 'policy' : 'policies'} selected
+                                </p>
+                            </div>
+                            {!bulkProcessing && (
+                                <button
+                                    onClick={handleCloseBulkModal}
+                                    className="ml-auto text-gray-400 hover:text-gray-600 transition-colors"
+                                >
+                                    <X size={18} />
+                                </button>
+                            )}
+                        </div>
+
+                        {/* Modal Body */}
+                        <div className="px-6 py-5 flex flex-col gap-4">
+
+                            {/* Processing state */}
+                            {bulkProcessing && (
+                                <div className="flex flex-col items-center gap-3 py-4">
+                                    <div className="w-10 h-10 rounded-full bg-blue-100 flex items-center justify-center">
+                                        <Loader2 size={20} className="text-blue-600 animate-spin" />
+                                    </div>
+                                    <p className="text-sm text-gray-600 font-medium">
+                                        Processing {selectedIds.size} {selectedIds.size === 1 ? 'policy' : 'policies'}…
+                                    </p>
+                                    <p className="text-xs text-gray-400">Please wait, do not close this window.</p>
+                                </div>
+                            )}
+
+                            {/* Result state */}
+                            {!bulkProcessing && bulkResult && (
+                                <div className="flex flex-col items-center gap-3 py-2">
+                                    {bulkResult.failed === 0
+                                        ? <div className="w-10 h-10 rounded-full bg-green-100 flex items-center justify-center">
+                                            <CheckCheck size={20} className="text-green-600" />
+                                          </div>
+                                        : <div className="w-10 h-10 rounded-full bg-orange-100 flex items-center justify-center">
+                                            <AlertTriangle size={20} className="text-orange-500" />
+                                          </div>
+                                    }
+                                    <p className="text-sm font-semibold text-gray-800 text-center">
+                                        {bulkResult.success > 0 && <span className="text-green-700">{bulkResult.success} succeeded</span>}
+                                        {bulkResult.success > 0 && bulkResult.failed > 0 && <span className="text-gray-400"> · </span>}
+                                        {bulkResult.failed > 0 && <span className="text-red-600">{bulkResult.failed} failed</span>}
+                                    </p>
+                                    {bulkResult.failed > 0 && (
+                                        <p className="text-xs text-gray-500 text-center">
+                                            Failed items may have already been processed or may lack an active workflow instance.
+                                        </p>
+                                    )}
+                                </div>
+                            )}
+
+                            {/* Normal (pre-submit) state */}
+                            {!bulkProcessing && !bulkResult && (
+                                <>
+                                    <p className="text-sm text-gray-600">
+                                        You are about to{' '}
+                                        <span className={`font-semibold
+                                            ${bulkActionType === 'approve' ? 'text-green-700' : bulkActionType === 'reject' ? 'text-red-700' : 'text-yellow-700'}`}>
+                                            {bulkActionType}
+                                        </span>{' '}
+                                        <span className="font-semibold text-gray-800">{selectedIds.size}</span>{' '}
+                                        {selectedIds.size === 1 ? 'policy' : 'policies'}.
+                                        This action will update the workflow status for each selected record.
+                                    </p>
+
+                                    {/* Selected policy IDs preview */}
+                                    <div className="bg-gray-50 border border-gray-200 rounded-lg px-3 py-2 max-h-24 overflow-y-auto">
+                                        <p className="text-xs text-gray-500 font-medium mb-1">Selected Policy IDs:</p>
+                                        <div className="flex flex-wrap gap-1">
+                                            {[...selectedIds].map(id => (
+                                                <span key={id} className="inline-flex items-center gap-1 px-2 py-0.5 bg-white border border-gray-300 rounded-full text-xs text-gray-700 font-medium">
+                                                    #{id}
+                                                </span>
+                                            ))}
+                                        </div>
+                                    </div>
+
+                                    {/* Comment field — required for reject/revert, optional for approve */}
+                                    <div className="flex flex-col gap-1.5">
+                                        <label className="text-xs font-semibold text-gray-700">
+                                            {bulkActionType === 'reject' ? 'Rejection Reason' : bulkActionType === 'revert' ? 'Revert Reason' : 'Comments'}
+                                            {(bulkActionType === 'reject' || bulkActionType === 'revert') && (
+                                                <span className="text-red-500 ml-0.5">*</span>
+                                            )}
+                                        </label>
+                                        <textarea
+                                            value={bulkComment}
+                                            onChange={(e) => {
+                                                setBulkComment(e.target.value);
+                                                if (bulkCommentError && e.target.value.trim()) setBulkCommentError('');
+                                            }}
+                                            placeholder={
+                                                bulkActionType === 'reject' ? 'Enter rejection reason…'
+                                                : bulkActionType === 'revert' ? 'Enter revert reason…'
+                                                : 'Optional comment…'
+                                            }
+                                            rows={3}
+                                            className={`w-full text-sm px-3 py-2 border rounded-lg resize-none focus:outline-none focus:ring-2 transition-colors
+                                                ${bulkCommentError
+                                                    ? 'border-red-400 focus:ring-red-300 bg-red-50'
+                                                    : 'border-gray-300 focus:ring-indigo-300 bg-white'}`}
+                                        />
+                                        {bulkCommentError && (
+                                            <p className="text-xs text-red-600 flex items-center gap-1">
+                                                <AlertTriangle size={12} /> {bulkCommentError}
+                                            </p>
+                                        )}
+                                    </div>
+                                </>
+                            )}
+                        </div>
+
+                        {/* Modal Footer */}
+                        {!bulkProcessing && (
+                            <div className="flex justify-end gap-3 px-6 py-4 border-t border-gray-100 bg-gray-50">
+                                <button
+                                    onClick={handleCloseBulkModal}
+                                    className="px-4 py-2 text-sm font-semibold rounded-lg border border-gray-300 text-gray-600 bg-white hover:bg-gray-100 transition-colors"
+                                >
+                                    {bulkResult ? 'Close' : 'Cancel'}
+                                </button>
+                                {!bulkResult && (
+                                    <button
+                                        onClick={handleConfirmBulkAction}
+                                        className={`px-4 py-2 text-sm font-semibold rounded-lg text-white shadow-sm transition-colors
+                                            ${bulkActionType === 'approve' ? 'bg-green-600 hover:bg-green-700'
+                                            : bulkActionType === 'reject'  ? 'bg-red-600 hover:bg-red-700'
+                                            : 'bg-yellow-500 hover:bg-yellow-600'}`}
+                                    >
+                                        Confirm {bulkActionType.charAt(0).toUpperCase() + bulkActionType.slice(1)}
+                                    </button>
+                                )}
+                            </div>
+                        )}
+                    </div>
+                </div>
+            )}
 
             {/* Confirm Delete Modal */}
             {showConfirmDeleteModal && invoiceToDelete && (

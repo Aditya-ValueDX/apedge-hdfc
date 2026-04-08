@@ -2,13 +2,13 @@ import React, { useState, useRef, useCallback } from "react";
 import { useSelector } from "react-redux";
 import axios from "../../../utils/authInterceptor";
 import {
-  FileIcon,          // ← renamed from File to avoid shadowing window.File
+  FileIcon,
   UploadCloud,
   Eye,
   FileText,
   Image,
   FileSpreadsheet,
-  FileCode,          // safe fallback for doc/docx icon
+  FileCode,
   X,
   Plus,
   FolderOpen,
@@ -16,8 +16,6 @@ import {
 import ViewDocumentModal from "../ViewDocumentModal";
 
 // Safe check: is this a native browser File object?
-// Using typeof + constructor name avoids the instanceof issue when the
-// lucide "File" icon is imported and shadows window.File in scope.
 const isNativeFile = (val) => {
   try {
     return (
@@ -108,7 +106,7 @@ const DocCard = ({ file, isPending = false, token, onRemove, onPreview, isReadon
           >
             <Eye size={12} />
           </button>
-          {!isReadonly && (
+          {!isReadonly && !(file.id && !isPending) && (
             <button
               onClick={handleRemove}
               disabled={removing}
@@ -148,27 +146,62 @@ const DocCard = ({ file, isPending = false, token, onRemove, onPreview, isReadon
 const Dropzone = ({ onDrop, onFileSelect, fileInputRef, isLoading, isReadonly, compact = false }) => {
   const [dragOver, setDragOver] = useState(false);
 
-  const handleDragOver = useCallback((e) => { e.preventDefault(); setDragOver(true); }, []);
-  const handleDragLeave = useCallback((e) => { e.preventDefault(); setDragOver(false); }, []);
-  const handleDrop = useCallback((e) => { e.preventDefault(); setDragOver(false); onDrop?.(e.dataTransfer.files); }, [onDrop]);
+  const handleDragOver = useCallback((e) => { 
+    e.preventDefault(); 
+    e.stopPropagation();
+    setDragOver(true); 
+  }, []);
+  
+  const handleDragLeave = useCallback((e) => { 
+    e.preventDefault(); 
+    e.stopPropagation();
+    setDragOver(false); 
+  }, []);
+  
+  const handleDrop = useCallback((e) => { 
+    e.preventDefault(); 
+    e.stopPropagation();
+    setDragOver(false); 
+    if (isReadonly || isLoading) return;
+    const files = e.dataTransfer?.files;
+    if (files && files.length > 0) {
+      onDrop?.(files);
+    }
+  }, [onDrop, isReadonly, isLoading]);
+
+  const handleFileInputChange = useCallback((e) => {
+    const files = e.target?.files;
+    if (files && files.length > 0) {
+      onFileSelect?.(files);
+    }
+    // Reset input value to allow selecting the same file again
+    if (e.target) {
+      e.target.value = '';
+    }
+  }, [onFileSelect]);
 
   if (compact) {
     return (
       <label
+        onDragOver={handleDragOver}
+        onDragLeave={handleDragLeave}
+        onDrop={handleDrop}
         className={`inline-flex items-center gap-2 px-3 py-1.5 rounded-lg border border-dashed cursor-pointer transition-all duration-200 text-[11px] font-medium
           ${isReadonly
             ? "border-gray-200 text-gray-300 cursor-not-allowed"
+            : dragOver
+            ? "border-indigo-400 bg-indigo-50 text-indigo-700"
             : "border-indigo-200 text-indigo-600 hover:bg-indigo-50 hover:border-indigo-400"
           }`}
       >
         <Plus size={13} />
-        Add Files
+        {dragOver ? "Drop files" : "Add Files"}
         <input
           type="file"
           className="hidden"
           ref={fileInputRef}
           disabled={isLoading || isReadonly}
-          onChange={(e) => onFileSelect?.(e.target.files)}
+          onChange={handleFileInputChange}
           accept=".pdf,.jpg,.jpeg,.png"
           multiple
         />
@@ -201,7 +234,7 @@ const Dropzone = ({ onDrop, onFileSelect, fileInputRef, isLoading, isReadonly, c
           className="hidden"
           ref={fileInputRef}
           disabled={isLoading || isReadonly}
-          onChange={(e) => onFileSelect?.(e.target.files)}
+          onChange={handleFileInputChange}
           accept=".pdf,.jpg,.jpeg,.png"
           multiple
         />
@@ -306,7 +339,7 @@ const VendorDocuments = ({
         {!isReadonly && hasAny && (
           <Dropzone
             compact
-            onDrop={handleFileSelect}
+            onDrop={onManualFileSelect}
             onFileSelect={onManualFileSelect}
             fileInputRef={fileInputRef}
             isLoading={isLoading}
@@ -318,7 +351,7 @@ const VendorDocuments = ({
       {/* ── Dropzone (full) — shown when no docs yet ───────────────────────── */}
       {!isReadonly && !hasAny && (
         <Dropzone
-          onDrop={handleFileSelect}
+          onDrop={onManualFileSelect}
           onFileSelect={onManualFileSelect}
           fileInputRef={fileInputRef}
           isLoading={isLoading}

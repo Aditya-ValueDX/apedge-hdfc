@@ -138,7 +138,7 @@ CREATE TABLE ap_parameters (
   req_value TEXT,
   description TEXT,
   apedge_group TEXT,
-  metadata TEXT,
+  metadata JSONB,
   protected_config TEXT,
   edit BOOLEAN DEFAULT TRUE,
   delete BOOLEAN DEFAULT TRUE,
@@ -286,6 +286,7 @@ CREATE TABLE ap_process_workflow_instances (
 	  error_desc JSONB,
 	
     -- Ownership & Traceability
+    pending_with VARCHAR(50),
     created_by INTEGER REFERENCES ap_users(id) ON DELETE SET NULL,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     updated_by INTEGER REFERENCES ap_users(id) ON DELETE SET NULL,
@@ -321,7 +322,7 @@ CREATE TABLE ap_process_workflow_history (
 
 CREATE TABLE ap_vendor_field_config (
     vendor_config_id SERIAL PRIMARY KEY,
-    tenant_id INTEGER NOT NULL REFERENCES ap_tenants(tenant_id) ON DELETE SET NULL,
+    tenant_id INTEGER REFERENCES ap_tenants(tenant_id) ON DELETE SET NULL,
     field_name TEXT NOT NULL,
     display_name TEXT NOT NULL,
     field_type TEXT,

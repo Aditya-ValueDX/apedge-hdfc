@@ -533,7 +533,7 @@ const TableComponent = ({
                               }
                             </div>
                           ) : (
-                            <div style={{ display: 'flex', alignItems: 'center' }} data-tour={tableSortDataTour}>
+                            <div style={{ display: 'flex', alignItems: 'center', justifyContent: col.headerAlign === 'center' ? 'center' : 'flex-start' }} data-tour={tableSortDataTour}>
                               <span style={{ color: '#374151', fontSize: '11px', fontWeight: 500, whiteSpace: 'nowrap' }}>
                                 {col.header}
                               </span>

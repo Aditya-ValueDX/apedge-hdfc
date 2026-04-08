@@ -2,7 +2,7 @@ import React, { useState, useEffect, useRef, useCallback, useMemo } from 'react'
 import axios from '../../utils/authInterceptor';
 import { toast, ToastContainer } from 'react-toastify';
 import 'react-toastify/dist/ReactToastify.css';
-import { Mail, Phone, Lock, User, KeyRound, XCircle, Plus, Info, Edit, Power, ShieldCheck, ShieldOff, Upload, Download, AlertTriangle, Trash2, Eye, EyeOff } from 'lucide-react';
+import { Mail, Phone, Lock, User, KeyRound, XCircle, Plus, Info, Edit, Power, ShieldCheck, ShieldOff, Upload, Download, AlertTriangle, Trash2, Eye, EyeOff, Building } from 'lucide-react';
 import { useSelector } from 'react-redux';
 import TableComponent from '../common/TableComponent';
 import classNames from 'classnames';
@@ -103,6 +103,8 @@ const UserTable = () => {
         password: '',
         role: '',
         isActive: true,
+        tenantId: '',
+        userType: '', // 'primary' or 'backup'
     });
     const [errors, setErrors] = useState({
         email: '',
@@ -112,6 +114,10 @@ const UserTable = () => {
         duplicateEmail: '',
         generalError: ''
     });
+
+    // State for tenants list
+    const [tenants, setTenants] = useState([]);
+    const [loadingTenants, setLoadingTenants] = useState(false);
 
     // State for table filtering and sorting
     const [page, setPage] = useState(() => getInitialPage());
@@ -153,11 +159,13 @@ const UserTable = () => {
     // Memoized list of available roles for the current user's context
     const AVAILABLE_ROLES = useMemo(() => {
         if (userRole === 'super_admin') {
-            return ['account_user', 'account_manager', 'tenant_admin'];
-        } else if (userRole === 'tenant_admin') {
-            return ['account_user', 'account_manager'];
-        } else if (userRole === 'account_manager') {
-            return ['account_user'];
+            // return ['sla', 'spoc', 'admin'];
+            return ['admin'];
+        } else if (userRole === 'admin') {
+            // return ['sla', 'spoc'];
+            return ['spoc'];
+        } else if (userRole === 'spoc') {
+            return ['sla'];
         }
     }, [userRole]);
 
@@ -356,6 +364,22 @@ const UserTable = () => {
     // Updates form data when a user is selected for editing
     useEffect(() => {
         if (editingAccountUser) {
+            // Parse metadata if it exists
+            let metadata = {};
+            try {
+                metadata = editingAccountUser.metadata ? JSON.parse(editingAccountUser.metadata) : {};
+            } catch (e) {
+                console.error('Error parsing metadata:', e);
+            }
+
+            // Determine userType from metadata
+            let userType = '';
+            if (metadata.primary) {
+                userType = 'primary';
+            } else if (metadata.backup) {
+                userType = 'backup';
+            }
+
             setFormData({
                 name: editingAccountUser.user_name || '',
                 email: editingAccountUser.email || '',
@@ -363,6 +387,8 @@ const UserTable = () => {
                 password: '',
                 role: editingAccountUser.user_role || AVAILABLE_ROLES[0],
                 isActive: editingAccountUser.is_active,
+                tenantId: editingAccountUser.tenant_id || '',
+                userType: userType,
             });
             setShowAddEditModal(true);
         } else {
@@ -374,6 +400,8 @@ const UserTable = () => {
                 password: '',
                 role: AVAILABLE_ROLES[0],
                 isActive: true,
+                tenantId: '',
+                userType: '',
             });
         }
         setPhoneError('');
@@ -493,22 +521,22 @@ const UserTable = () => {
         if (value.length > 200) {
             return 'Maximum length exceeded (200 characters)';
         }
-        
+
         // Check if string contains only spaces
         if (validateOnlySpaces(value)) {
             return 'Input cannot contain only spaces';
         }
-        
+
         // Check if string starts with spaces
         if (validateLeadingSpaces(value)) {
             return 'Input cannot start with spaces';
         }
-        
+
         // Validate input - only allow letters and spaces
         if (!validateAlphabetic(value)) {
             return 'Only letters and spaces are allowed';
         }
-        
+
         return null; // Valid input
     };
 
@@ -518,29 +546,54 @@ const UserTable = () => {
         if (value && value.length > 200) {
             return 'Maximum length exceeded (200 characters)';
         }
-        
+
         // Check if string contains only spaces
         if (validateOnlySpaces(value)) {
             return 'Input cannot contain only spaces';
         }
-        
+
         // Check if string starts with spaces
         if (validateLeadingSpaces(value)) {
             return 'Input cannot start with spaces';
         }
-        
+
         // Check if string ends with spaces
         if (validateTrailingSpaces(value)) {
             return 'Input cannot end with spaces';
         }
-        
+
         // Validate input - only allow alphanumeric characters, spaces, underscores, and hyphens
         if (!validateSpecialCharacters(value)) {
             return `Only alphanumeric characters, spaces, underscores (_), and hyphens (-) are allowed in ${fieldName}`;
         }
-        
+
         return null; // Valid input
     };
+
+    // Fetch tenants for dropdown
+    const fetchTenants = useCallback(async () => {
+        if (!token) return;
+
+        setLoadingTenants(true);
+        try {
+            const response = await axios.get(`/api/v1/tables/ap_tenants?select=tenant_id,tenant_name&order=tenant_name.asc`, {
+                headers: { Authorization: `Bearer ${token}` }
+            });
+            setTenants(response.data || []);
+        } catch (error) {
+            console.error('Error fetching tenants:', error);
+            toast.error('Failed to load tenants');
+        } finally {
+            setLoadingTenants(false);
+        }
+    }, [token]);
+
+    // Fetch tenants when modal opens and user is tenant_admin
+    useEffect(() => {
+        if (showAddEditModal && token && userRole === 'admin') {
+            fetchTenants();
+        }
+    }, [showAddEditModal, token, userRole, fetchTenants]);
 
     // Password validation function
     const validatePassword = (password) => {
@@ -551,7 +604,7 @@ const UserTable = () => {
             hasSpecialChar: /[!@#$%^&*(),.?":{}|<>]/.test(password),
             noSpaces: !/\s/.test(password)
         };
-        
+
         const isValid = Object.values(validations).every(check => check);
         return { isValid, validations };
     };
@@ -560,13 +613,13 @@ const UserTable = () => {
     const getPasswordStrength = (password) => {
         const { validations } = validatePassword(password);
         const passedChecks = Object.values(validations).filter(check => check).length;
-        
+
         if (password.length === 0) return { level: 0, label: '', color: '' };
         if (passedChecks <= 2) return { level: 1, label: 'Weak', color: 'bg-red-500' };
         if (passedChecks === 3) return { level: 2, label: 'Medium', color: 'bg-yellow-500' };
         if (passedChecks === 4) return { level: 3, label: 'Strong', color: 'bg-green-500' };
         if (passedChecks === 5) return { level: 4, label: 'Very Strong', color: 'bg-green-600' };
-        
+
         return { level: 0, label: '', color: '' };
     };
 
@@ -580,13 +633,13 @@ const UserTable = () => {
             return;
         }
         const { name, value, type, checked } = e.target;
-        
+
         // Clear general error when user starts typing
         setErrors(prev => ({
             ...prev,
             generalError: ''
         }));
-        
+
         // Apply validation based on field name
         if (name === 'name') {
             // Validate name field - allows spaces between words during typing
@@ -657,7 +710,7 @@ const UserTable = () => {
                 }));
             }
         }
-        
+
         setFormData((prev) => ({
             ...prev,
             [name]: type === 'checkbox' ? checked : value
@@ -687,6 +740,8 @@ const UserTable = () => {
             password: '',
             role: AVAILABLE_ROLES[0],
             isActive: true,
+            tenantId: '',
+            userType: '',
         });
         setErrors({
             email: '',
@@ -704,9 +759,9 @@ const UserTable = () => {
     // Function to check if form is valid
     const isFormValid = () => {
         // Check required fields
-        if (!formData.name.trim() || 
-            !formData.email.trim() || 
-            !formData.phone.trim() || 
+        if (!formData.name.trim() ||
+            !formData.email.trim() ||
+            !formData.phone.trim() ||
             !formData.role) {
             return false;
         }
@@ -876,6 +931,42 @@ const UserTable = () => {
                 updated_at: getCurrentTimeISOString(),
             };
 
+            // Tenant assignment logic based on role hierarchy
+            if (isSuperAdmin && role === 'admin') {
+                // super_admin creating admin -> pass tenant_id as 0
+                userPayload.tenant_id = 0;
+            } else if (userRole === 'admin' && role === 'spoc') {
+                // admin creating spoc -> must select tenant from dropdown
+                if (!formData.tenantId) {
+                    setErrors(prev => ({
+                        ...prev,
+                        generalError: 'Please select a tenant for the spoc.'
+                    }));
+                    setLoading(false);
+                    return;
+                }
+                userPayload.tenant_id = formData.tenantId;
+            } else if (userRole === 'admin' && role === 'sla') {
+                // admin creating sla -> use admin's tenant
+                userPayload.tenant_id = tenantId;
+            } else if (userRole === 'spoc' && role === 'sla') {
+                // spoc creating sla -> use spoc's tenant
+                userPayload.tenant_id = tenantId;
+            } else {
+                // For any other scenario, use current user's tenant or null for super_admin
+                userPayload.tenant_id = isSuperAdmin ? null : tenantId;
+            }
+
+            // Prepare metadata
+            let metadata = {};
+            if (formData.userType === 'primary') {
+                metadata.primary = true;
+                metadata.backup = false;
+            } else if (formData.userType === 'backup') {
+                metadata.primary = false;
+                metadata.backup = true;
+            }
+
             if (isNewUser) {
                 const existingUsers = await axios.get(`/api/v1/tables/ap_users?email=eq.${email}`);
                 if (existingUsers.data?.length > 0) {
@@ -889,15 +980,36 @@ const UserTable = () => {
                 userPayload.password = password;
                 userPayload.created_at = getCurrentTimeISOString();
                 userPayload.created_by = userId;
-                userPayload.tenant_id = isSuperAdmin ? null : tenantId;
 
+                // Register user via signup API (without metadata)
                 await axios.post(`/api/api/signup`, userPayload);
+
+                // Now update the metadata separately
+                if (Object.keys(metadata).length > 0) {
+                    // First get the user ID by email to use in the patch request
+                    const existingUsers = await axios.get(`/api/v1/tables/ap_users?email=eq.${email}&select=id`);
+                    if (existingUsers.data && existingUsers.data.length > 0) {
+                        const userId = existingUsers.data[0].id;
+                        const metadataPayload = {
+                            metadata: JSON.stringify(metadata),
+                            updated_at: getCurrentTimeISOString(),
+                        };
+                        await axios.patch(`/api/v1/tables/ap_users?id=eq.${userId}`, metadataPayload);
+                    }
+                }
+
                 toast.success('User registered successfully!');
 
             } else {
                 if (password) {
                     userPayload.user_password = password;
                 }
+
+                // Update metadata separately
+                if (Object.keys(metadata).length > 0) {
+                    userPayload.metadata = JSON.stringify(metadata);
+                }
+
                 const patchUrl = `/api/v1/tables/ap_users?id=eq.${editingAccountUser.id}`;
                 await axios.patch(patchUrl, userPayload);
                 toast.success('User updated successfully!');
@@ -908,7 +1020,7 @@ const UserTable = () => {
         } catch (error) {
             // Operation error
             let errorMessage = error.response?.data?.message || error.message || 'An unexpected error occurred during operation.';
-            
+
             // Check if it's a duplicate email error from database constraint
             if (errorMessage.includes('duplicate key value violates unique constraint') && errorMessage.includes('ap_users_email_key')) {
                 setErrors(prev => ({
@@ -1255,7 +1367,7 @@ const UserTable = () => {
                     user_role: user.user_role,
                     user_name: user.user_name,
                     is_active: true,
-                    tenant_id: isSuperAdmin ? null : tenantId,
+                    tenant_id: isSuperAdmin ? 0 : tenantId,
                 };
                 return axios.post(`/api/api/signup`, userPayload);
             });
@@ -1420,7 +1532,9 @@ const UserTable = () => {
     }), []);
 
     const accountUserTableColumns = useMemo(() => {
-        const columns = isSuperAdmin ? [tenantColumn, ...baseColumns] : baseColumns;
+        // const columns = isSuperAdmin ? [tenantColumn, ...baseColumns] : baseColumns;
+
+        const columns = isSuperAdmin ? [...baseColumns] : baseColumns;
         return [...columns,
         {
             key: 'actions',
@@ -1432,7 +1546,7 @@ const UserTable = () => {
                         className="action-icon-button"
                         onClick={() => handleEditAccountUser(item)}
                         title={!canEditUsers ? editPermissionDeniedMessage : "Edit user"}
-                        disabled={!canEditUsers || item.user_role === 'tenant_admin'}
+                        disabled={!canEditUsers}
                         data-tour="user-edit-button"
                     >
                         <Edit size={14} color="#4f46e5" />
@@ -1441,13 +1555,13 @@ const UserTable = () => {
                         className="action-icon-button"
                         onClick={() => handleChangeUserStatus(item)}
                         title={!canEditUsers ? editPermissionDeniedMessage : `Set to ${item.is_active ? 'Inactive' : 'Active'}`}
-                        disabled={!canEditUsers || item.user_role === 'tenant_admin'}
+                        disabled={!canEditUsers}
                         data-tour="user-active-toggle"
                     >
                         {item.is_active ? (
-                            <ShieldCheck size={14} color={!canEditUsers || item.user_role === 'tenant_admin' ? '#9ca3af' : '#10b981'} />
+                            <ShieldCheck size={14} color={!canEditUsers ? '#9ca3af' : '#10b981'} />
                         ) : (
-                            <ShieldOff size={14} color={!canEditUsers || item.user_role === 'tenant_admin' ? '#9ca3af' : '#ef4444'} />
+                            <ShieldOff size={14} color={!canEditUsers ? '#9ca3af' : '#ef4444'} />
                         )}
                     </button>
                     {canDeleteUsers && (
@@ -1455,10 +1569,10 @@ const UserTable = () => {
                             className="action-icon-button"
                             onClick={() => handleDeleteAccountUserClick(item)}
                             title="Delete user"
-                            disabled={item.user_role === 'tenant_admin'}
+                            disabled={!canDeleteUsers}
                             data-tour="user-delete-button"
                         >
-                            <Trash2 size={14} color={item.user_role === 'tenant_admin' ? '#9ca3af' : '#ef4444'} />
+                            <Trash2 size={14} color={!canDeleteUsers ? '#9ca3af' : '#ef4444'} />
                         </button>
                     )}
                 </div>
@@ -1502,27 +1616,24 @@ const UserTable = () => {
                                 </button>
                             )}
                         </div>
-                        {canEditUsers && userRole !== 'super_admin' && (
-                        <button
-                            className="inline-flex items-center gap-1 px-2 py-1 bg-indigo-600 text-white text-xs font-normal rounded shadow-sm hover:bg-indigo-700 transition-colors duration-200"
-                            onClick={() => {
-                                if (!isSuperAdmin) {
+                        {canEditUsers && (
+                            <button
+                                className="inline-flex items-center gap-1 px-2 py-1 bg-indigo-600 text-white text-xs font-normal rounded shadow-sm hover:bg-indigo-700 transition-colors duration-200"
+                                onClick={() => {
+
                                     setEditingAccountUser(null);
                                     setShowAddEditModal(true);
-                                }
-                            }}
-                            disabled={!canEditUsers || isSuperAdmin}
-                            title={
-                                !canEditUsers
-                                    ? editPermissionDeniedMessage
-                                    : isSuperAdmin
-                                        ? "Super Admins cannot add new users"
-                                        : "Add a new user"
-                            }
-                            data-tour="add-user-button"
-                        >
-                            <Plus size={10} /> Add User
-                        </button>
+                                    // if (!isSuperAdmin) {
+                                    //     setEditingAccountUser(null);
+                                    //     setShowAddEditModal(true);
+                                    // }
+                                }}
+                                disabled={!canEditUsers}
+                                title={"Add a new user"}
+                                data-tour="add-user-button"
+                            >
+                                <Plus size={10} /> Add User
+                            </button>
                         )}
                         {!isSuperAdmin && (
                             <button
@@ -1711,7 +1822,7 @@ const UserTable = () => {
                                                 {!validatePassword(formData.password).validations.noSpaces && <p>• No spaces allowed</p>}
                                             </div>
                                         )}
-                                        
+
                                         {/* Password Strength and Requirements */}
                                         <div className="mt-1 space-y-1">
                                             <div className="flex items-center justify-between mt-2">
@@ -1725,7 +1836,7 @@ const UserTable = () => {
                                                 )}
                                             </div>
                                             <div className="w-full bg-gray-200 rounded-full h-1">
-                                                <div 
+                                                <div
                                                     className={`h-1 rounded-full ${getPasswordStrength(formData.password).color}`}
                                                     style={{ width: `${getPasswordStrength(formData.password).level * 25}%` }}
                                                 ></div>
@@ -1752,6 +1863,59 @@ const UserTable = () => {
                                         </select>
                                     </div>
                                 </div>
+
+                                {/* Tenant Dropdown - Show when admin is creating spoc */}
+                                {(userRole === 'admin' && formData.role === 'spoc') && (
+                                    <div className="flex flex-col">
+                                        <label htmlFor="tenantId" className="text-xs font-medium text-gray-700 mb-1">
+                                            Tenant <span className="text-red-500">*</span>
+                                        </label>
+                                        <div className="relative">
+                                            <Building size={14} className="absolute left-2.5 top-1/2 -translate-y-1/2 text-gray-400 pointer-events-none" />
+                                            <select
+                                                id="tenantId"
+                                                name="tenantId"
+                                                value={formData.tenantId}
+                                                onChange={handleChange}
+                                                disabled={!canEditUsers || loadingTenants}
+                                                required
+                                                title={!canEditUsers ? editPermissionDeniedMessage : "Select the tenant"}
+                                                className="w-full px-3 pl-8 py-1.5 rounded-md border border-gray-300 text-xs text-black transition-all focus:outline-none focus:border-blue-500 focus:ring-2 focus:ring-blue-500/50"
+                                            >
+                                                <option value="">Select Tenant</option>
+                                                {tenants.map(tenant => (
+                                                    <option key={tenant.tenant_id} value={tenant.tenant_id}>
+                                                        {tenant.tenant_name}
+                                                    </option>
+                                                ))}
+                                            </select>
+                                        </div>
+                                    </div>
+                                )}
+
+                                {/* User Type Dropdown */}
+                                <div className="flex flex-col">
+                                    <label htmlFor="userType" className="text-xs font-medium text-gray-700 mb-1">
+                                        User Type
+                                    </label>
+                                    <div className="relative">
+                                        <User size={14} className="absolute left-2.5 top-1/2 -translate-y-1/2 text-gray-400 pointer-events-none" />
+                                        <select
+                                            id="userType"
+                                            name="userType"
+                                            value={formData.userType}
+                                            onChange={handleChange}
+                                            disabled={!canEditUsers}
+                                            title={!canEditUsers ? editPermissionDeniedMessage : "Select user type (Primary or Backup)"}
+                                            className="w-full px-3 pl-8 py-1.5 rounded-md border border-gray-300 text-xs text-black transition-all focus:outline-none focus:border-blue-500 focus:ring-2 focus:ring-blue-500/50"
+                                        >
+                                            <option value="">Select Type</option>
+                                            <option value="primary">Primary</option>
+                                            <option value="backup">Backup</option>
+                                        </select>
+                                    </div>
+                                </div>
+
                                 {editingAccountUser && (
                                     <div className="flex items-center mt-4">
                                         <label htmlFor="isActive" className="text-xs font-medium text-gray-700 mr-2">Status:</label>
